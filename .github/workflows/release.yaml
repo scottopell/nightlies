@@ -28,10 +28,8 @@ jobs:
 
     - name: Upload Release Asset
       uses: actions/upload-release-asset@v1
+      uses: softprops/action-gh-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
       with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./target/release/nightlies
-        asset_name: nightlies
-        asset_content_type: application/octet-stream
+        files: ./target/release/nightlies
