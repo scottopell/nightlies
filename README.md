@@ -1,3 +1,6 @@
+# Install
+`cargo install --git https://github.com/scottopell/nightlies --bin nightlies`
+
 ```
 Lists the most recent agent-dev nightly images and a GH link for each
 
