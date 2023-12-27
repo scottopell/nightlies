@@ -1,37 +1,33 @@
 ```
-Agent Nightly Images 1.0
-Scott Opell <me@scottopell.com>
-Scrapes and lists the recent agent nightly images and a GH link for each.
+Lists the most recent agent-dev nightly images and a GH link for each
 
-USAGE:
-    nightlies [SUBCOMMAND]
+Usage: nightlies [OPTIONS]
 
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-SUBCOMMANDS:
-    help      Prints this message or the help of the given subcommand(s)
-    query     Queries the database for nightlies
-    update    Updates the database with new nightlies
+Options:
+  -a, --all-tags                 Include all tags, not just those ending in -py3
+  -p, --print-digest             Print the image digest for each tag
+      --target-sha <TARGET_SHA>  If the given target_sha exists as a nightly, print the tag
+  -f, --from-date <FROM_DATE>    Start date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
+  -t, --to-date <TO_DATE>        End date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
+  -h, --help                     Print help
+  -V, --version                  Print version
 ```
 
 ## Example Usage
 ```
 ./target/release/nightlies
-Name: nightly-main-py3, Last Pushed: 2023-11-02T04:21:03.804663Z
-Name: nightly-main-1bf80594-py3, Last Pushed: 2023-11-02T04:21:03.578999Z, GitHub URL: https://github.com/DataDog/datadog-agent/tree/1bf80594
-Name: nightly-main-a5ef9a77-py3, Last Pushed: 2023-11-01T04:10:01.535483Z, GitHub URL: https://github.com/DataDog/datadog-agent/tree/a5ef9a77
-Name: nightly-main-9610a269-py3, Last Pushed: 2023-10-31T04:10:23.476751Z, GitHub URL: https://github.com/DataDog/datadog-agent/tree/9610a269
-Name: nightly-main-70ca5d9b-py3, Last Pushed: 2023-10-30T04:13:31.875125Z, GitHub URL: https://github.com/DataDog/datadog-agent/tree/70ca5d9b
-Name: nightly-main-fb59d07f-py3, Last Pushed: 2023-10-29T04:09:48.9653Z, GitHub URL: https://github.com/DataDog/datadog-agent/tree/fb59d07f
-Name: nightly-main-17ac27f0-py3, Last Pushed: 2023-10-27T04:12:54.595658Z, GitHub URL: https://github.com/DataDog/datadog-agent/tree/17ac27f0
-Name: nightly-main-ac7747e4-py3, Last Pushed: 2023-10-26T04:10:50.862523Z, GitHub URL: https://github.com/DataDog/datadog-agent/tree/ac7747e4
-Name: nightly-main-c4590e26-py3, Last Pushed: 2023-10-25T04:07:46.154271Z, GitHub URL: https://github.com/DataDog/datadog-agent/tree/c4590e26
-Name: nightly-main-ffde3207-py3, Last Pushed: 2023-10-24T05:10:44.26368Z, GitHub URL: https://github.com/DataDog/datadog-agent/tree/ffde3207
+2023-12-27T19:48:28.785149Z  INFO nightlies: Hello, world!
+Name: nightly-main-py3, Last Pushed: 2023-12-27T04:16:25.592017+00:00
+Name: nightly-main-c9456471-py3, Last Pushed: 2023-12-27T04:16:25.291765+00:00, GitHub URL: https://github.com/DataDog/datadog-agent/tree/c9456471
+Name: nightly-main-e4acb3f1-py3, Last Pushed: 2023-12-26T04:15:28.785892+00:00, GitHub URL: https://github.com/DataDog/datadog-agent/tree/e4acb3f1
+Name: nightly-main-bd53dc3f-py3, Last Pushed: 2023-12-25T04:16:31.373255+00:00, GitHub URL: https://github.com/DataDog/datadog-agent/tree/bd53dc3f
+Name: nightly-main-26065b2a-py3, Last Pushed: 2023-12-24T04:16:18.709055+00:00, GitHub URL: https://github.com/DataDog/datadog-agent/tree/26065b2a
+Name: nightly-main-0dc69c06-py3, Last Pushed: 2023-12-22T04:15:09.061328+00:00, GitHub URL: https://github.com/DataDog/datadog-agent/tree/0dc69c06
+Name: nightly-main-d50e711a-py3, Last Pushed: 2023-12-21T04:15:30.813378+00:00, GitHub URL: https://github.com/DataDog/datadog-agent/tree/d50e711a
 ```
 
 ## Releasing
+> TODO this is broken
 A new binary can be built by the `release` github workflow by pushing a tag that starts with `v`.
 
 eg:
