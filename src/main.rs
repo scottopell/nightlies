@@ -36,6 +36,10 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     print_digest: bool,
 
+    /// If the given target_sha exists as a nightly, print the tag
+    #[arg(long)]
+    target_sha: Option<String>,
+
     /// Start date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
     #[arg(short, long, value_parser = parse_datetime)]
     from_date: Option<DateTime<Utc>>,
@@ -116,19 +120,35 @@ async fn main() -> Result<(), NightlyError> {
 
     // If dates are specified, lets look at that range
     if let Some(from) = args.from_date {
-        query_range(&tags, from, args.to_date, args.all_tags, args.print_digest)?;
+        let tags = query_range(&tags, from, args.to_date);
+        for t in tags {
+            print_tag(t, args.all_tags, args.print_digest);
+        }
+    } else if let Some(target_sha) = args.target_sha {
+        let target_tags = find_tags_by_sha(&tags, &target_sha);
+        for t in target_tags {
+            print_tag(t, args.all_tags, args.print_digest);
+        }
     } else {
         // default is to just display the most recent 7 days
-        query_range(
-            &tags,
-            (Utc::now() - Duration::days(7)).into(),
-            None,
-            args.all_tags,
-            args.print_digest,
-        )?
+        let tags = query_range(&tags, (Utc::now() - Duration::days(7)).into(), None);
+        for t in tags {
+            print_tag(t, args.all_tags, args.print_digest);
+        }
     }
 
     Ok(())
+}
+
+fn find_tags_by_sha<'a, 'b>(
+    tags: &'a [Tag],
+    target_sha: &'b str,
+) -> impl Iterator<Item = &'a Tag> + 'a
+where
+    'b: 'a,
+{
+    println!("Searching for tag with sha: {}", target_sha);
+    tags.iter().filter(move |t| t.name.contains(target_sha))
 }
 
 /// Fetches the first `num_pages` of results from the docker registry API
@@ -196,23 +216,21 @@ fn query_range(
     tags: &[Tag],
     from_date: DateTime<Utc>,
     to_date: Option<DateTime<Utc>>,
-    all_tags: bool,
-    print_digest: bool,
-) -> Result<(), crate::NightlyError> {
-    // Assumes tags are ordered by date
-    for tag in tags {
+) -> impl Iterator<Item = &Tag> + '_ {
+    let r = tags.iter().filter(move |t| {
         if let Some(to_date) = to_date {
-            if tag.last_pushed > to_date {
-                continue;
-            }
-        } else if tag.last_pushed >= from_date {
-            print_tag(tag, all_tags, print_digest)?;
+            t.last_pushed > to_date
+        } else if t.last_pushed >= from_date {
+            true
+        } else {
+            false
         }
-    }
-    Ok(())
+    });
+
+    r
 }
 
-fn print_tag(tag: &Tag, all_tags: bool, print_digest: bool) -> Result<(), crate::NightlyError> {
+fn print_tag(tag: &Tag, all_tags: bool, print_digest: bool) {
     if all_tags || tag.name.ends_with("-py3") {
         let last_pushed = tag.last_pushed.to_rfc3339();
         print!("Name: {}, Last Pushed: {}", tag.name, last_pushed,);
@@ -231,5 +249,4 @@ fn print_tag(tag: &Tag, all_tags: bool, print_digest: bool) -> Result<(), crate:
         }
         println!();
     }
-    Ok(())
 }
