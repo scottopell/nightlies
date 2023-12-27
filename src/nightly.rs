@@ -130,7 +130,10 @@ pub fn query_range(
 pub fn print_tag(tag: &Tag, all_tags: bool, print_digest: bool) {
     if all_tags || tag.name.ends_with("-py3") {
         let last_pushed = tag.last_pushed.to_rfc3339();
-        print!("Name: {}, Last Pushed: {}", tag.name, last_pushed,);
+        print!(
+            "Tag: datadog/agent-dev:{}, Last Pushed: {}",
+            tag.name, last_pushed,
+        );
 
         if print_digest {
             print!(", Image Digest: {}", tag.digest);
