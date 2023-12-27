@@ -10,6 +10,8 @@ use std::{
 };
 use thiserror::Error;
 use tokio::task::JoinError;
+use tracing::{debug, info, level_filters::LevelFilter, warn};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 const URL: &str = "https://hub.docker.com/v2/repositories/datadog/agent-dev/tags";
 
@@ -93,6 +95,16 @@ struct Tag {
 
 #[tokio::main]
 async fn main() -> Result<(), NightlyError> {
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(env_filter)
+        .init();
+
+    info!("Hello, world!");
     let args = Args::parse();
 
     // Fetch tags from docker registry and load from cache file in parallel
@@ -114,7 +126,7 @@ async fn main() -> Result<(), NightlyError> {
     tokio::spawn(async move {
         match save_cached_tags(&to_save) {
             Ok(_) => {}
-            Err(e) => println!("Error saving tags: {}", e),
+            Err(e) => warn!("Error saving tags: {}", e),
         }
     });
 
@@ -147,7 +159,7 @@ fn find_tags_by_sha<'a, 'b>(
 where
     'b: 'a,
 {
-    println!("Searching for tag with sha: {}", target_sha);
+    debug!("Searching for tag with sha: {}", target_sha);
     tags.iter().filter(move |t| t.name.contains(target_sha))
 }
 
@@ -170,7 +182,7 @@ async fn fetch_docker_registry_tags(num_pages: usize) -> Result<Vec<Tag>, crate:
             .filter_map(|t| match serde_json::from_value(t.clone()) {
                 Ok(tag) => Some(tag),
                 Err(e) => {
-                    println!("Error parsing tag: {}", e);
+                    warn!("Error parsing tag: {}", e);
                     None
                 }
             })
@@ -190,7 +202,7 @@ async fn fetch_docker_registry_tags(num_pages: usize) -> Result<Vec<Tag>, crate:
 fn save_cached_tags(tags: &[Tag]) -> Result<(), crate::NightlyError> {
     let file: &Path = CACHE_FILE.as_path();
     fs::write(file, serde_json::to_string_pretty(&tags)?)?;
-    println!("Updated tags saved to {file}", file = file.display());
+    debug!("Updated tags saved to {file}", file = file.display());
     Ok(())
 }
 
@@ -205,7 +217,7 @@ fn load_tags() -> Result<Vec<Tag>, crate::NightlyError> {
             if e.kind() == std::io::ErrorKind::NotFound {
                 // No cache file found, this is not a concerning error
             } else {
-                println!("Cache file reading error: {}", e);
+                warn!("Cache file reading error: {}", e);
             }
             Ok(Vec::new())
         }
@@ -219,11 +231,9 @@ fn query_range(
 ) -> impl Iterator<Item = &Tag> + '_ {
     let r = tags.iter().filter(move |t| {
         if let Some(to_date) = to_date {
-            t.last_pushed > to_date
-        } else if t.last_pushed >= from_date {
-            true
+            t.last_pushed <= to_date && t.last_pushed >= from_date
         } else {
-            false
+            t.last_pushed >= from_date
         }
     });
 
