@@ -1,182 +1,227 @@
-use chrono::{DateTime, Duration, NaiveDateTime, Utc};
-use clap::{App, Arg, SubCommand};
+use chrono::{DateTime, Duration, Utc};
+use clap::Parser;
+use once_cell::sync::Lazy;
 use reqwest;
-use serde_json::{json, Value};
-use std::fs;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+use thiserror::Error;
+use tokio::task::JoinError;
 
 const URL: &str = "https://hub.docker.com/v2/repositories/datadog/agent-dev/tags";
-const OUTPUT_FILE: &str = "agent_nightlies.json";
+
+static CACHE_FILE: Lazy<PathBuf> = Lazy::new(|| {
+    // get a 'stable' temp dir that can be used to cache the results from previous runs
+    let dir = std::env::temp_dir();
+    PathBuf::from(dir).join("agent_nightlies.json")
+});
+
+fn parse_datetime(s: &str) -> Result<DateTime<Utc>, crate::NightlyError> {
+    let datetime = DateTime::parse_from_rfc3339(s)?;
+    Ok(datetime.into())
+}
+
+/// Lists the most recent agent-dev nightly images and a GH link for each
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Include all tags, not just those ending in -py3
+    #[arg(short, long, default_value_t = false)]
+    all_tags: bool,
+
+    /// Print the image digest for each tag
+    #[arg(short, long, default_value_t = false)]
+    print_digest: bool,
+
+    /// Start date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
+    #[arg(short, long, value_parser = parse_datetime)]
+    from_date: Option<DateTime<Utc>>,
+
+    /// End date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
+    #[arg(short, long, value_parser = parse_datetime)]
+    to_date: Option<DateTime<Utc>>,
+}
+
+fn merge_tags(tags_a: Vec<Tag>, tags_b: Vec<Tag>) -> Result<Vec<Tag>, crate::NightlyError> {
+    let mut tags = tags_a;
+
+    // Remove duplicates and ensure sorted by struct field last_pushed
+    let mut tags_b: Vec<Tag> = tags_b.into_iter().filter(|t| !tags.contains(t)).collect();
+    tags.append(&mut tags_b);
+    tags.sort_by(|a, b| b.last_pushed.cmp(&a.last_pushed));
+
+    Ok(tags)
+}
+
+#[derive(Error, Debug)]
+pub enum NightlyError {
+    #[error("Error while fetching tags from docker registry: {0}")]
+    FetchError(#[from] reqwest::Error),
+
+    #[error("Error while interacting with tag cache file: {0}")]
+    FileError(#[from] std::io::Error),
+
+    #[error("Json error: {0}")]
+    JSONError(#[from] serde_json::Error),
+
+    #[error("Join error: {0}")]
+    JoinError(#[from] JoinError),
+
+    #[error("Parse Error: {0}")]
+    DateParseError(#[from] chrono::ParseError),
+
+    #[error("Generic Error: {0}")]
+    GenericError(String),
+}
+
+#[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
+struct Tag {
+    name: String,
+
+    #[serde(rename = "tag_last_pushed")]
+    last_pushed: DateTime<Utc>,
+
+    digest: String,
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let matches = App::new("Agent Nightly Images")
-        .version("1.0")
-        .author("Scott Opell <me@scottopell.com>")
-        .about("Scrapes and lists the recent agent nightly images and a GH link for each.")
-        .subcommand(SubCommand::with_name("update")
-            .about("Updates the database with new nightlies"))
-        .subcommand(SubCommand::with_name("query")
-            .about("Queries the database for nightlies")
-            .arg(Arg::with_name("recent")
-                .short("r")
-                .long("recent")
-                .value_name("NUMBER")
-                .help("Queries the most recent N nightlies")
-                .takes_value(true))
-            .arg(Arg::with_name("all-tags")
-                .long("all-tags")
-                .help("Include all tags, not just those ending in -py3"))
-            .arg(Arg::with_name("from")
-                .short("f")
-                .long("from")
-                .value_name("FROM_DATE")
-                .help("Queries nightlies from this date (inclusive), format: YYYY-MM-DDTHH:MM:SS")
-                .takes_value(true))
-            .arg(Arg::with_name("to")
-                .short("t")
-                .long("to")
-                .value_name("TO_DATE")
-                .help("Queries nightlies to this date (inclusive), format: YYYY-MM-DDTHH:MM:SS")
-                .takes_value(true)))
-        .get_matches();
+async fn main() -> Result<(), NightlyError> {
+    let args = Args::parse();
 
-    match matches.subcommand() {
-        ("update", Some(_)) => update_database().await?,
-        ("query", Some(matches)) => {
-            let mut tags = load_tags()?;
-
-            // Check if there's data from the last 48 hours
-            let mut is_data_recent = false;
-            let now = Utc::now();
-            for tag in &tags {
-                let pushed_date =
-                    DateTime::parse_from_rfc3339(tag["tag_last_pushed"].as_str().unwrap())?
-                        .with_timezone(&Utc);
-                if (now - pushed_date).num_hours() < 48 {
-                    is_data_recent = true;
-                    break;
-                }
-            }
-
-            // Update database if data is stale
-            if !is_data_recent {
-                println!("Data from the last 48 hours not found. Updating database...");
-                update_database().await?;
-                tags = load_tags()?;
-            }
-
-            // Execute the query requested
-            let all_tags = matches.is_present("all-tags");
-            if let Some(n) = matches.value_of("recent") {
-                let n = n.parse::<usize>().unwrap();
-                query_recent(&tags, n, all_tags)?;
-            } else if let Some(from) = matches.value_of("from") {
-                let from_date = NaiveDateTime::parse_from_str(from, "%Y-%m-%dT%H:%M:%S").unwrap();
-                let to_date = matches
-                    .value_of("to")
-                    .map(|to| NaiveDateTime::parse_from_str(to, "%Y-%m-%dT%H:%M:%S").unwrap())
-                    .unwrap_or_else(|| Utc::now().naive_utc());
-                query_range(&tags, from_date, to_date, all_tags)?;
-            }
-        }
-        _ => {
+    // Fetch tags from docker registry and load from cache file in parallel
+    // This idea is sound, but not really that useful in practice.
+    // But this project is just for fun anyway
+    let (live_tags, file_tags) = tokio::join!(
+        tokio::spawn(async move {
+            let tags = fetch_docker_registry_tags(1).await?;
+            Ok::<_, crate::NightlyError>(tags)
+        }),
+        tokio::spawn(async move {
             let tags = load_tags()?;
-            query_recent(&tags, 10, false)?;
+            Ok::<_, crate::NightlyError>(tags)
+        })
+    );
+    let tags = merge_tags(live_tags??, file_tags??)?;
+
+    let to_save = tags.clone();
+    tokio::spawn(async move {
+        match save_cached_tags(&to_save) {
+            Ok(_) => {}
+            Err(e) => println!("Error saving tags: {}", e),
         }
+    });
+
+    // If dates are specified, lets look at that range
+    if let Some(from) = args.from_date {
+        query_range(&tags, from, args.to_date, args.all_tags, args.print_digest)?;
+    } else {
+        // default is to just display the most recent 7 days
+        query_range(
+            &tags,
+            (Utc::now() - Duration::days(7)).into(),
+            None,
+            args.all_tags,
+            args.print_digest,
+        )?
     }
 
     Ok(())
 }
 
-async fn update_database() -> Result<(), Box<dyn std::error::Error>> {
-    let mut tags = load_tags()?;
-    let most_recent_date = tags
-        .iter()
-        .map(|tag| DateTime::parse_from_rfc3339(tag["tag_last_pushed"].as_str().unwrap()).unwrap())
-        .max()
-        .unwrap_or_else(|| (Utc::now() - Duration::weeks(52)).into());
-
+/// Fetches the first `num_pages` of results from the docker registry API
+/// Page size is hardcoded to 100
+async fn fetch_docker_registry_tags(num_pages: usize) -> Result<Vec<Tag>, crate::NightlyError> {
     let mut url = format!("{}?page_size=100&name=nightly-main-", URL);
 
+    let mut tags: Vec<Tag> = Vec::new();
+    let mut num_pages_fetched = 0;
     loop {
+        if num_pages_fetched >= num_pages {
+            break;
+        }
+
         let response: Value = reqwest::get(&url).await?.json().await?;
         let results = response["results"].as_array().unwrap();
-
-        for tag in results {
-            let last_pushed =
-                DateTime::parse_from_rfc3339(tag["tag_last_pushed"].as_str().unwrap()).unwrap();
-            if last_pushed > most_recent_date {
-                let new_tag = json!({
-                    "name": tag["name"].as_str().unwrap(),
-                    "tag_last_pushed": tag["tag_last_pushed"].as_str().unwrap()
-                });
-                tags.push(new_tag);
-            }
-        }
+        let mut tag_results: Vec<Tag> = results
+            .iter()
+            .filter_map(|t| match serde_json::from_value(t.clone()) {
+                Ok(tag) => Some(tag),
+                Err(e) => {
+                    println!("Error parsing tag: {}", e);
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        tags.append(&mut tag_results);
 
         if response["next"].is_null() {
             break;
         }
         url = response["next"].as_str().unwrap().to_string();
+        num_pages_fetched += 1;
     }
 
-    fs::write(OUTPUT_FILE, serde_json::to_string_pretty(&tags)?)?;
-    println!("Updated tags saved to {}", OUTPUT_FILE);
-    Ok(())
-}
-
-fn load_tags() -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let file_content = fs::read_to_string(OUTPUT_FILE).unwrap_or_else(|_| "[]".to_string());
-    let tags: Vec<Value> = serde_json::from_str(&file_content)?;
     Ok(tags)
 }
 
-fn query_recent(
-    tags: &[Value],
-    n: usize,
-    all_tags: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let filtered_tags: Vec<&Value> = tags
-        .iter()
-        .filter(|&tag| all_tags || tag["name"].as_str().unwrap().ends_with("-py3"))
-        .collect();
-    let mut recent_tags: Vec<&Value> = filtered_tags.iter().cloned().collect();
-    recent_tags.sort_by(|a, b| {
-        b["tag_last_pushed"]
-            .as_str()
-            .cmp(&a["tag_last_pushed"].as_str())
-    });
-
-    for tag in recent_tags.iter().take(n) {
-        print_tag(tag, all_tags)?;
-    }
+fn save_cached_tags(tags: &[Tag]) -> Result<(), crate::NightlyError> {
+    let file: &Path = CACHE_FILE.as_path();
+    fs::write(file, serde_json::to_string_pretty(&tags)?)?;
+    println!("Updated tags saved to {file}", file = file.display());
     Ok(())
 }
 
+fn load_tags() -> Result<Vec<Tag>, crate::NightlyError> {
+    let file: &Path = CACHE_FILE.as_path();
+    match fs::read_to_string(file) {
+        Ok(file_content) => {
+            let tags: Vec<Tag> = serde_json::from_str(&file_content)?;
+            Ok(tags)
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                // No cache file found, this is not a concerning error
+            } else {
+                println!("Cache file reading error: {}", e);
+            }
+            Ok(Vec::new())
+        }
+    }
+}
+
 fn query_range(
-    tags: &[Value],
-    from_date: NaiveDateTime,
-    to_date: NaiveDateTime,
+    tags: &[Tag],
+    from_date: DateTime<Utc>,
+    to_date: Option<DateTime<Utc>>,
     all_tags: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+    print_digest: bool,
+) -> Result<(), crate::NightlyError> {
+    // Assumes tags are ordered by date
     for tag in tags {
-        let tag_date = DateTime::parse_from_rfc3339(tag["tag_last_pushed"].as_str().unwrap())
-            .unwrap()
-            .naive_utc();
-        if tag_date >= from_date && tag_date <= to_date {
-            print_tag(tag, all_tags)?;
+        if let Some(to_date) = to_date {
+            if tag.last_pushed > to_date {
+                continue;
+            }
+        } else if tag.last_pushed >= from_date {
+            print_tag(tag, all_tags, print_digest)?;
         }
     }
     Ok(())
 }
 
-fn print_tag(tag: &Value, all_tags: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let name = tag["name"].as_str().unwrap();
-    if all_tags || name.ends_with("-py3") {
-        let last_pushed = tag["tag_last_pushed"].as_str().unwrap();
-        print!("Name: {}, Last Pushed: {}", name, last_pushed);
+fn print_tag(tag: &Tag, all_tags: bool, print_digest: bool) -> Result<(), crate::NightlyError> {
+    if all_tags || tag.name.ends_with("-py3") {
+        let last_pushed = tag.last_pushed.to_rfc3339();
+        print!("Name: {}, Last Pushed: {}", tag.name, last_pushed,);
 
-        if let Some(sha) = name.split('-').nth(2) {
+        if print_digest {
+            print!(", Image Digest: {}", tag.digest);
+        }
+
+        if let Some(sha) = tag.name.split('-').nth(2) {
             if sha.len() == 8 {
                 print!(
                     ", GitHub URL: https://github.com/DataDog/datadog-agent/tree/{}",
