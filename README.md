@@ -7,13 +7,22 @@ Lists the most recent agent-dev nightly images and a GH link for each
 Usage: nightlies [OPTIONS]
 
 Options:
-  -a, --all-tags                 Include all tags, not just those ending in -py3
-  -p, --print-digest             Print the image digest for each tag
-      --target-sha <TARGET_SHA>  If the given target_sha exists as a nightly, print the tag
-  -f, --from-date <FROM_DATE>    Start date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
-  -t, --to-date <TO_DATE>        End date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
-  -h, --help                     Print help
-  -V, --version                  Print version
+  -a, --all-tags
+          Include all tags, not just those ending in -py3
+  -p, --print-digest
+          Print the image digest for each tag
+      --target-sha <TARGET_SHA>
+          If the given target_sha exists as a nightly, print the tag
+      --num-registry-pages <NUM_REGISTRY_PAGES>
+          Number of pages to fetch from the docker registry API
+  -f, --from-date <FROM_DATE>
+          Start date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
+  -t, --to-date <TO_DATE>
+          End date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
 
 ## Example Usage
