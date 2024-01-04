@@ -18,7 +18,7 @@ pub enum NightlyError {
     JoinError(#[from] JoinError),
 
     #[error("Parse Error: {0}")]
-    DateParseError(#[from] chrono::ParseError),
+    DateParseError(String),
 
     #[error("Generic Error: {0}")]
     GenericError(String),
