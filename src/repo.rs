@@ -17,7 +17,7 @@ fn get_agent_repo_path() -> Result<PathBuf, NightlyError> {
 }
 
 fn open_git_repo() -> Result<Repository, NightlyError> {
-    Repository::open(get_agent_repo_path()?).map_err(|e| NightlyError::GitError(e))
+    Repository::open(get_agent_repo_path()?).map_err(NightlyError::GitError)
 }
 
 /// Starting from the given branch, walk backwards until we find the commit with the given sha
@@ -59,7 +59,12 @@ pub fn friendly_git_may_be_stale_warning(target_sha: &str) {
 /// Given a sha that exists in the 'main' branch of the datadog-agent repo, print
 /// the first nightly build that contains that change
 /// nightlies is assumed to be ordered from newest to oldest
-pub fn get_first_nightly_containing_change(nightlies: &Vec<Nightly>, change_sha: &str) -> Result<Nightly, NightlyError> {
+///
+/// # Errors
+/// - If the given sha is not found on the main branch
+/// - If no nightly is found containing the given sha
+/// - If the git repo cannot be opened
+pub fn get_first_nightly_containing_change(nightlies: &[Nightly], change_sha: &str) -> Result<Nightly, NightlyError> {
     let repo = open_git_repo()?;
     let main = repo.find_branch("main", git2::BranchType::Local)?;
     let head_of_main = main.get().peel_to_commit()?;
@@ -67,7 +72,7 @@ pub fn get_first_nightly_containing_change(nightlies: &Vec<Nightly>, change_sha:
     let commit = get_commit_by_sha(&repo, change_sha, &head_of_main)?;
     let Some(_commit) = commit else {
         friendly_git_may_be_stale_warning(change_sha);
-        return Err(NightlyError::GenericError(format!("commit '{}' not found on 'main'", change_sha)));
+        return Err(NightlyError::GenericError(format!("commit '{change_sha}' not found on 'main'")));
     };
 
     let mut containing_nightly: Option<Nightly> = None;
@@ -93,5 +98,5 @@ pub fn get_first_nightly_containing_change(nightlies: &Vec<Nightly>, change_sha:
     }
 
 
-    containing_nightly.ok_or_else(|| NightlyError::GenericError(format!("No nightly found containing commit: {}", change_sha)))
+    containing_nightly.ok_or_else(|| NightlyError::GenericError(format!("No nightly found containing commit: {change_sha}")))
 }

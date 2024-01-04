@@ -6,7 +6,7 @@ use clap::Parser;
 use nightlies::{
     nightly::{
         fetch_docker_registry_tags, print_tag,
-        print_nightly,
+        print,
         query_range, tags_to_nightlies, find_nightly_by_build_sha,
     },
     NightlyError, repo::get_first_nightly_containing_change,
@@ -28,7 +28,7 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>, NightlyError> {
         Ok(date) => {
             let default_time = NaiveTime::from_hms_opt(0, 0, 0).expect("Invalid time");
             let datetime = NaiveDateTime::new(date, default_time);
-            return Ok(datetime.and_utc().into());
+            return Ok(datetime.and_utc());
         }
         Err(e) => {
             err_str.write_fmt(format_args!("\n Error parsing date as YYYY-MM-DD: {}", e))
@@ -105,18 +105,18 @@ async fn main() -> Result<(), NightlyError> {
     } else if let Some(build_sha) = args.build_sha {
         let nightly = find_nightly_by_build_sha(&nightlies, &build_sha);
         if let Some(nightly) = nightly {
-            print_nightly(&mut tw, &nightly, args.all_tags, args.print_digest);
+            print(&mut tw, nightly, args.all_tags, args.print_digest);
         } else {
             warn!("Could not find nightly for build sha: {}", build_sha)
         }
     } else if let Some(sha) = args.agent_sha {
         let nightly = get_first_nightly_containing_change(&nightlies, &sha)?;
 
-        write!(&mut tw, "The first nightly containing the target sha is:\n").expect("Error writing to tabwriter");
-        print_nightly(&mut tw, &nightly, args.all_tags, args.print_digest);
+        writeln!(&mut tw, "The first nightly containing the target sha is:").expect("Error writing to tabwriter");
+        print(&mut tw, &nightly, args.all_tags, args.print_digest);
     } else {
         // default is to just display the most recent 7 days
-        let tags = query_range(&tags, (Utc::now() - Duration::days(7)).into(), None);
+        let tags = query_range(&tags, Utc::now() - Duration::days(7), None);
         for t in tags {
             print_tag(&mut tw, t, args.all_tags, args.print_digest);
         }
