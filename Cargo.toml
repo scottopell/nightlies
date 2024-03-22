@@ -16,4 +16,7 @@ thiserror = "1.0.52"
 serde = { version = "1.0.193", features = ["derive"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["std", "env-filter", "registry", "fmt"] }
+git2 = "0.18.1"
+home = "0.5.9"
+tabwriter = "1.4.0"
 

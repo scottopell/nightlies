@@ -1,15 +1,18 @@
 use std::fmt::Write;
+use std::io::Write as IoWrite;
 
-use chrono::{DateTime, Duration, Utc, NaiveDateTime, NaiveTime, NaiveDate};
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use clap::Parser;
 use nightlies::{
     nightly::{
-        fetch_docker_registry_tags, find_tags_by_sha, print_tag,
-        query_range,
+        enrich_nightlies, fetch_docker_registry_tags, find_nightly_by_build_sha,
+        load_db_from_cache, print, query_range, save_db_to_cache,
     },
+    repo::get_first_nightly_containing_change,
     NightlyError,
 };
-use tracing::{info, level_filters::LevelFilter};
+use tabwriter::TabWriter;
+use tracing::{info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn parse_datetime(s: &str) -> Result<DateTime<Utc>, NightlyError> {
@@ -17,7 +20,8 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>, NightlyError> {
     match DateTime::parse_from_rfc3339(s) {
         Ok(datetime) => return Ok(datetime.into()),
         Err(e) => {
-            err_str.write_fmt(format_args!("Error parsing date as RFC3339: {}", e))
+            err_str
+                .write_fmt(format_args!("Error parsing date as RFC3339: {}", e))
                 .unwrap();
         }
     }
@@ -25,10 +29,11 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>, NightlyError> {
         Ok(date) => {
             let default_time = NaiveTime::from_hms_opt(0, 0, 0).expect("Invalid time");
             let datetime = NaiveDateTime::new(date, default_time);
-            return Ok(datetime.and_utc().into());
+            return Ok(datetime.and_utc());
         }
         Err(e) => {
-            err_str.write_fmt(format_args!("\n Error parsing date as YYYY-MM-DD: {}", e))
+            err_str
+                .write_fmt(format_args!("\n Error parsing date as YYYY-MM-DD: {}", e))
                 .unwrap();
         }
     }
@@ -47,9 +52,15 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     print_digest: bool,
 
-    /// If the given target_sha exists as a nightly, print the tag
+    /// If the given build_sha exists as a nightly, print the tag
     #[arg(long)]
-    target_sha: Option<String>,
+    build_sha: Option<String>,
+
+    /// Given a sha that exists in the 'main' branch of the datadog-agent repo, print
+    /// the first nightly that contains that sha
+    /// EXPERIMENTAL - there are known bugs, use at your own risk
+    #[arg(long)]
+    agent_sha: Option<String>,
 
     /// Number of pages to fetch from the docker registry API
     #[arg(long)]
@@ -83,27 +94,74 @@ async fn main() -> Result<(), NightlyError> {
     // For now I've added in a cli option to specify number of pages
     // If you don't see the dates you're looking for, try increasing the number of pages
     let num_pages = args.num_registry_pages.unwrap_or(1);
-    let tags = fetch_docker_registry_tags(num_pages).await?;
 
+    // Fetch tags from docker registry and load from cache file in parallel
+    let (live_tags, file_nightlies) = tokio::join!(
+        tokio::spawn(async move {
+            let tags = fetch_docker_registry_tags(num_pages).await?;
+            Ok::<_, crate::NightlyError>(tags)
+        }),
+        tokio::spawn(async move {
+            let nightlies = load_db_from_cache()?;
+            Ok::<_, crate::NightlyError>(nightlies)
+        })
+    );
+    let live_tags = live_tags??;
+    let mut nightlies = file_nightlies??;
+
+    enrich_nightlies(&live_tags, &mut nightlies)?;
+    //let live_nightlies = tags_to_nightlies(&live_tags);
+    // merge live_nightlies with file_nightlies and de-dup by sha
+    // probably should pass the vec here, not a slice to avoid cloning
+    //let nightlies = combine_live_and_file_nightlies(&live_nightlies, &file_nightlies);
+
+    let to_save = nightlies.clone();
+    tokio::spawn(async move {
+        match save_db_to_cache(&to_save) {
+            Ok(_) => {}
+            Err(e) => warn!("Error saving db: {}", e),
+        }
+    });
+
+    let mut tw = TabWriter::new(vec![]);
     // If dates are specified, lets look at that range
     if let Some(from) = args.from_date {
-        info!("Querying range: {} - {}", from, args.to_date.unwrap_or(Utc::now()));
-        let tags = query_range(&tags, from, args.to_date);
-        for t in tags {
-            print_tag(t, args.all_tags, args.print_digest);
+        info!(
+            "Querying range: {} - {}",
+            from,
+            args.to_date.unwrap_or(Utc::now())
+        );
+        let mut nightlies: Vec<&nightlies::nightly::Nightly> =
+            query_range(&nightlies, from, args.to_date).collect();
+        nightlies.sort_by(|a, b| a.sha_timestamp.cmp(&b.sha_timestamp));
+        for n in nightlies {
+            print(&mut tw, n, args.all_tags, args.print_digest);
         }
-    } else if let Some(target_sha) = args.target_sha {
-        let target_tags = find_tags_by_sha(&tags, &target_sha);
-        for t in target_tags {
-            print_tag(t, args.all_tags, args.print_digest);
+    } else if let Some(build_sha) = args.build_sha {
+        let nightly = find_nightly_by_build_sha(&nightlies, &build_sha);
+        if let Some(nightly) = nightly {
+            print(&mut tw, nightly, args.all_tags, args.print_digest);
+        } else {
+            warn!("Could not find nightly for build sha: {}", build_sha)
         }
+    } else if let Some(sha) = args.agent_sha {
+        let nightly = get_first_nightly_containing_change(&nightlies, &sha)?;
+
+        writeln!(&mut tw, "The first nightly containing the target sha is:")
+            .expect("Error writing to tabwriter");
+        print(&mut tw, &nightly, args.all_tags, args.print_digest);
     } else {
         // default is to just display the most recent 7 days
-        let tags = query_range(&tags, (Utc::now() - Duration::days(7)).into(), None);
-        for t in tags {
-            print_tag(t, args.all_tags, args.print_digest);
+        let mut nightlies: Vec<&nightlies::nightly::Nightly> =
+            query_range(&nightlies, Utc::now() - Duration::days(7), None).collect();
+        nightlies.sort_by(|a, b| a.sha_timestamp.cmp(&b.sha_timestamp));
+        for n in nightlies {
+            print(&mut tw, n, args.all_tags, args.print_digest);
         }
     }
+
+    let written = String::from_utf8(tw.into_inner().unwrap()).unwrap();
+    print!("{}", written);
 
     Ok(())
 }
