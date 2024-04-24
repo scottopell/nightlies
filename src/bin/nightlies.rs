@@ -80,7 +80,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), NightlyError> {
+async fn main() -> anyhow::Result<()> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();

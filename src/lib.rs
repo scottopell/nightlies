@@ -24,7 +24,7 @@ pub enum NightlyError {
     GenericError(String),
 
     #[error("Git Error: {0}")]
-    GitError(#[from] git2::Error),
+    GitError(String),
 }
 
 pub mod nightly;
