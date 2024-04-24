@@ -1,34 +1,64 @@
 name: Release
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
-      - 'v*'
+      - v[0-9]+.*
 
 jobs:
-  build_and_release:
+  create-release:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub release
+        uses: taiki-e/create-gh-release-action@v1
+        with:
+          changelog: CHANGELOG.md
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-binaries:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+
+      # Try to complete every job in the matrix, even if one fails.
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
-    - name: Setup Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: stable
-        override: true
+      # Run the build & upload artifacts
+      - name: Build and upload lading binaries
+        uses: taiki-e/upload-rust-binary-action@v1
 
-    - name: Build Release
-      uses: actions-rs/cargo@v1
-      with:
-        command: build
-        args: --release
-
-    - name: Upload Release Asset
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-      with:
-        files: ./target/release/nightlies
+        with:
+          bin: nightlies
+          no_default_features: true
+          target: ${{ matrix.target }}
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
