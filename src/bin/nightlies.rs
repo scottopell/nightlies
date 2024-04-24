@@ -66,6 +66,10 @@ struct Args {
     #[arg(long)]
     num_registry_pages: Option<usize>,
 
+    /// Show only most recently published nightly in full URI format
+    #[arg(long, default_value_t = false)]
+    latest_only: bool,
+
     /// Start date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
     #[arg(short, long, value_parser = parse_datetime)]
     from_date: Option<DateTime<Utc>>,
@@ -110,10 +114,6 @@ async fn main() -> Result<(), NightlyError> {
     let mut nightlies = file_nightlies??;
 
     enrich_nightlies(&live_tags, &mut nightlies)?;
-    //let live_nightlies = tags_to_nightlies(&live_tags);
-    // merge live_nightlies with file_nightlies and de-dup by sha
-    // probably should pass the vec here, not a slice to avoid cloning
-    //let nightlies = combine_live_and_file_nightlies(&live_nightlies, &file_nightlies);
 
     let to_save = nightlies.clone();
     tokio::spawn(async move {
@@ -124,6 +124,25 @@ async fn main() -> Result<(), NightlyError> {
     });
 
     let mut tw = TabWriter::new(vec![]);
+    if args.latest_only {
+        let latest = nightlies.iter().max_by_key(|n| n.sha_timestamp);
+        if let Some(latest) = latest {
+            writeln!(
+                &mut tw,
+                "{}",
+                latest
+                    .py3
+                    .as_ref()
+                    .expect("No py3 image found for latest nightly, something is wrong...")
+                    .name
+            )
+            .expect("Error writing to tabwriter");
+        }
+        let written = String::from_utf8(tw.into_inner().unwrap()).unwrap();
+        print!("{}", written);
+        return Ok(());
+    }
+
     // If dates are specified, lets look at that range
     if let Some(from) = args.from_date {
         info!(

@@ -36,7 +36,7 @@ impl Tag {
 pub struct Nightly {
     pub sha: String,
     pub estimated_last_pushed: DateTime<Utc>,
-    pub sha_timestamp: DateTime<Utc>,
+    pub sha_timestamp: Option<DateTime<Utc>>,
 
     pub py3: Option<Tag>,
     pub py2: Option<Tag>,
@@ -134,15 +134,13 @@ fn sha_and_tags_to_nightly(sha: &str, tags: &[Tag]) -> Result<Nightly, NightlyEr
         let estimated_last_pushed = tag.last_pushed;
 
         let sha_timestamp = match get_commit_timestamp(sha) {
-            Ok(timestamp) => timestamp,
+            Ok(timestamp) => Some(timestamp),
             Err(e) => {
-                warn!(
-                    "Error getting commit timestamp for nightly sha: {}, skipping nightly...",
-                    e
-                );
-                return Err(e);
+                warn!("Error getting commit timestamp for nightly sha: {}", e);
+                None
             }
         };
+
         Ok(Nightly {
             sha: sha.to_string(),
             estimated_last_pushed,
@@ -245,10 +243,11 @@ pub fn query_range(
     to_date: Option<DateTime<Utc>>,
 ) -> impl Iterator<Item = &Nightly> + '_ {
     let r = nightlies.iter().filter(move |n| {
+        let nightly_timestamp = n.sha_timestamp.unwrap_or(n.estimated_last_pushed);
         if let Some(to_date) = to_date {
-            n.sha_timestamp <= to_date && n.sha_timestamp >= from_date
+            nightly_timestamp <= to_date && nightly_timestamp >= from_date
         } else {
-            n.sha_timestamp >= from_date
+            nightly_timestamp >= from_date
         }
     });
 
@@ -272,11 +271,22 @@ where
         .or(nightly.py2_jmx.as_ref())
         .or(nightly.jmx.as_ref())
         .unwrap();
-    writeln!(writer, "Nightly: datadog/agent-dev:{},\tSHA Timestamp: {}\tGitHub URL: https://github.com/DataDog/datadog-agent/tree/{}",
-        first_valid_image.name,
-        nightly.sha_timestamp.to_rfc3339(),
+    writeln!(
+        writer,
+        "Nightly: datadog/agent-dev:{},\t",
+        first_valid_image.name
+    )
+    .expect("Error writing to writer");
+    if let Some(sha_timestamp) = nightly.sha_timestamp {
+        writeln!(writer, "SHA Timestamp: {}\t", sha_timestamp.to_rfc3339())
+            .expect("Error writing nightly to writer");
+    }
+    writeln!(
+        writer,
+        "GitHub URL: https://github.com/DataDog/datadog-agent/tree/{}",
         nightly.sha,
-    ).expect("Error writing nightly to writer");
+    )
+    .expect("Error writing nightly to writer");
 
     if all_tags {
         if let Some(tag) = &nightly.jmx {
