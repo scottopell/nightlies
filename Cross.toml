@@ -7,31 +7,23 @@
 image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get --assume-yes install openssl libssl-dev"
+    "apt-get update && apt-get --assume-yes install pkg-config libssl-dev"
 ]
 [target.aarch64-unknown-linux-musl]
 image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get --assume-yes install openssl libssl-dev"
+    "apt-get update && apt-get --assume-yes install pkg-config libssl-dev"
 ]
 [target.x86_64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get --assume-yes install openssl libssl-dev"
+    "apt-get update && apt-get --assume-yes install pkg-config libssl-dev"
 ]
 [target.x86_64-unknown-linux-musl]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get --assume-yes install openssl libssl-dev"
-]
-[target.x86_64-apple-darwin]
-pre-build = [
-    "brew install protobuf"
-]
-[target.aarch64-apple-darwin]
-pre-build = [
-    "brew install protobuf"
+    "apt-get update && apt-get --assume-yes install pkg-config libssl-dev"
 ]
