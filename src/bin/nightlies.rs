@@ -70,6 +70,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     latest_only: bool,
 
+    /// Show only the 2nd most recently published nightly in full URI format
+    #[arg(long, default_value_t = false)]
+    prev_latest_only: bool,
+
     /// Start date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
     #[arg(short, long, value_parser = parse_datetime)]
     from_date: Option<DateTime<Utc>>,
@@ -131,6 +135,27 @@ async fn main() -> anyhow::Result<()> {
                 &mut tw,
                 "{}",
                 latest
+                    .py3
+                    .as_ref()
+                    .expect("No py3 image found for latest nightly, something is wrong...")
+                    .name
+            )
+            .expect("Error writing to tabwriter");
+        }
+        let written = String::from_utf8(tw.into_inner().unwrap()).unwrap();
+        print!("{}", written);
+        return Ok(());
+    }
+    if args.prev_latest_only {
+        // get the 2nd most recent by sha_timestamp
+        let mut nightlies = nightlies.clone();
+        nightlies.sort_by(|a, b| a.sha_timestamp.cmp(&b.sha_timestamp));
+        let prev_latest = nightlies.get(nightlies.len() - 2);
+        if let Some(prev_latest) = prev_latest {
+            writeln!(
+                &mut tw,
+                "{}",
+                prev_latest
                     .py3
                     .as_ref()
                     .expect("No py3 image found for latest nightly, something is wrong...")
