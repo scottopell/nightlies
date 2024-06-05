@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
                 prev_latest
                     .py3
                     .as_ref()
-                    .expect("No py3 image found for latest nightly, something is wrong...")
+                    .expect("No py3 image found for 2nd latest nightly, something is wrong...")
                     .name
             )
             .expect("Error writing to tabwriter");
