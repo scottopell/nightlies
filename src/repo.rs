@@ -22,7 +22,7 @@ fn get_agent_repo_path() -> Result<PathBuf> {
 
 fn open_git_repo() -> Result<Repository> {
     let repo = get_agent_repo_path()?;
-    gix::open(repo).map_err(|e| e.into())
+    gix::open(repo).map_err(std::convert::Into::into)
 }
 
 /// Starting from the given branch, walk backwards until we find the commit with the given sha

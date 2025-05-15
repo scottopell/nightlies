@@ -5,12 +5,12 @@ use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
 use tracing::{debug, info, warn};
 
+// Updated URL for nightly-full tags
 const URL: &str = "https://hub.docker.com/v2/repositories/datadog/agent-dev/tags";
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
@@ -22,27 +22,26 @@ pub struct Tag {
 }
 
 impl Tag {
+    // Updated to extract SHA from nightly-full-main-SHA-jmx format
     fn get_sha(&self) -> Option<&str> {
-        if let Some(sha) = self.name.split('-').nth(2) {
-            if sha.len() == 8 {
-                return Some(sha);
+        if self.name.starts_with("nightly-full-main-") && self.name.ends_with("-jmx") {
+            if let Some(sha) = self.name.split('-').nth(3) {
+                if sha.len() == 8 {
+                    return Some(sha);
+                }
             }
         }
         None
     }
 }
 
+// Simplified Nightly struct - only contains a single tag
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub struct Nightly {
     pub sha: String,
     pub estimated_last_pushed: DateTime<Utc>,
     pub sha_timestamp: Option<DateTime<Utc>>,
-
-    pub py3: Option<Tag>,
-    pub py2: Option<Tag>,
-    pub py3_jmx: Option<Tag>,
-    pub py2_jmx: Option<Tag>,
-    pub jmx: Option<Tag>,
+    pub tag: Tag,
 }
 
 static CACHE_FILE: Lazy<PathBuf> = Lazy::new(|| {
@@ -81,25 +80,55 @@ where
 /// # Errors
 /// - Errors if any of the tags cannot be parsed into a nightly
 /// - Errors if any of the tags are missing a sha
-/// - Errors if any of the tags are missing a timestamp
 pub fn enrich_nightlies(tags: &[Tag], nightlies: &mut Vec<Nightly>) -> Result<(), NightlyError> {
     let initial_nightlies_len = nightlies.len();
-    let mut nightlies_from_tags: HashMap<String, Vec<Tag>> = HashMap::new();
-    for tag in tags {
-        let Some(sha) = tag.get_sha() else {
-            continue;
-        };
-        let entry = nightlies_from_tags
-            .entry(sha.to_string())
-            .or_insert_with(|| vec![]);
-        entry.push(tag.clone());
-    }
 
-    for (nightly_sha, tags_for_sha) in &nightlies_from_tags {
-        if !nightlies.iter_mut().any(|n| n.sha == *nightly_sha) {
-            let new_nightly = sha_and_tags_to_nightly(nightly_sha, tags_for_sha)?;
-            nightlies.push(new_nightly);
+    debug!("Processing {} tags to enrich nightlies", tags.len());
+    // Filter tags to just those with 'nightly-full-main' prefix and '-jmx' suffix
+    let valid_tags: Vec<&Tag> = tags
+        .iter()
+        .filter(|tag| {
+            let has_sha = tag.get_sha().is_some();
+            debug!("Tag {}: has_sha={}", tag.name, has_sha);
+            has_sha
+        })
+        .collect();
+
+    debug!("Found {} valid nightly-full tags", valid_tags.len());
+
+    for tag in valid_tags {
+        let sha = tag.get_sha().unwrap();
+        // Skip if we already have this nightly
+        if nightlies.iter().any(|n| n.sha == sha) {
+            debug!("Skipping already tracked nightly for SHA: {}", sha);
+            continue;
         }
+
+        // Create the new nightly
+        debug!(
+            "Creating new nightly for SHA: {} with tag: {}",
+            sha, tag.name
+        );
+
+        let sha_timestamp = match get_commit_timestamp(sha) {
+            Ok(timestamp) => Some(timestamp),
+            Err(e) => {
+                warn!(
+                    "Error getting commit timestamp for nightly sha {}: {}",
+                    sha, e
+                );
+                None
+            }
+        };
+
+        let nightly = Nightly {
+            sha: sha.to_string(),
+            estimated_last_pushed: tag.last_pushed,
+            sha_timestamp,
+            tag: tag.clone(),
+        };
+
+        nightlies.push(nightly);
     }
 
     debug!(
@@ -110,76 +139,41 @@ pub fn enrich_nightlies(tags: &[Tag], nightlies: &mut Vec<Nightly>) -> Result<()
     Ok(())
 }
 
-fn sha_and_tags_to_nightly(sha: &str, tags: &[Tag]) -> Result<Nightly, NightlyError> {
-    let mut py3 = None;
-    let mut py2 = None;
-    let mut py3_jmx = None;
-    let mut py2_jmx = None;
-    let mut jmx = None;
-    for tag in tags {
-        if tag.name.ends_with("-py3") {
-            py3 = Some(tag);
-        } else if tag.name.ends_with("-py2") {
-            py2 = Some(tag);
-        } else if tag.name.ends_with("-py3-jmx") {
-            py3_jmx = Some(tag);
-        } else if tag.name.ends_with("-py2-jmx") {
-            py2_jmx = Some(tag);
-        } else if tag.name.ends_with("-jmx") {
-            jmx = Some(tag);
-        }
-    }
-    let first_some = py3.or(py2).or(py3_jmx).or(py2_jmx).or(jmx);
-    if let Some(tag) = first_some {
-        let estimated_last_pushed = tag.last_pushed;
+#[must_use]
+pub fn tags_to_nightlies(tags: &[Tag]) -> Vec<Nightly> {
+    let mut nightlies = Vec::new();
+
+    debug!("Converting {} tags to nightlies", tags.len());
+    // Filter to just nightly-full tags
+    let valid_tags: Vec<&Tag> = tags.iter().filter(|tag| tag.get_sha().is_some()).collect();
+
+    debug!("Found {} valid nightly-full tags", valid_tags.len());
+
+    for tag in valid_tags {
+        let sha = tag.get_sha().unwrap();
 
         let sha_timestamp = match get_commit_timestamp(sha) {
             Ok(timestamp) => Some(timestamp),
             Err(e) => {
-                warn!("Error getting commit timestamp for nightly sha: {}", e);
+                warn!(
+                    "Error getting commit timestamp for nightly sha {}: {}",
+                    sha, e
+                );
                 None
             }
         };
 
-        Ok(Nightly {
+        let nightly = Nightly {
             sha: sha.to_string(),
-            estimated_last_pushed,
+            estimated_last_pushed: tag.last_pushed,
             sha_timestamp,
-            py3: py3.cloned(),
-            py2: py2.cloned(),
-            py3_jmx: py3_jmx.cloned(),
-            py2_jmx: py2_jmx.cloned(),
-            jmx: jmx.cloned(),
-        })
-    } else {
-        Err(NightlyError::GenericError(format!(
-            "Missing tags for sha: {sha}"
-        )))
-    }
-}
-
-#[must_use]
-pub fn tags_to_nightlies(tags: &[Tag]) -> Vec<Nightly> {
-    let mut nightlies: HashMap<String, Vec<Tag>> = HashMap::new();
-    for tag in tags {
-        let Some(sha) = tag.get_sha() else {
-            continue;
+            tag: tag.clone(),
         };
-        let entry = nightlies.entry(sha.to_string()).or_insert_with(|| vec![]);
-        entry.push(tag.clone());
+
+        nightlies.push(nightly);
     }
 
-    let mut nightlies = nightlies
-        .into_iter()
-        .filter_map(|(sha, tags)| match sha_and_tags_to_nightly(&sha, &tags) {
-            Ok(nightly) => Some(nightly),
-            Err(e) => {
-                warn!("Error parsing nightly: {}", e);
-                None
-            }
-        })
-        .collect::<Vec<Nightly>>();
-
+    // Sort nightlies by last_pushed date
     nightlies.sort_by(|a, b| b.estimated_last_pushed.cmp(&a.estimated_last_pushed));
 
     nightlies
@@ -194,29 +188,40 @@ pub fn tags_to_nightlies(tags: &[Tag]) -> Vec<Nightly> {
 /// # Errors
 /// - Errors if there is a problem fetching data from the docker registry api
 pub async fn fetch_docker_registry_tags(num_pages: usize) -> Result<Vec<Tag>, NightlyError> {
-    let mut url = format!("{URL}?page_size=100&name=nightly-main-");
+    // Updated to search for nightly-full-main prefix
+    let mut url = format!("{URL}?page_size=100&name=nightly-full-main-");
 
     let mut tags: Vec<Tag> = Vec::new();
     let mut num_pages_fetched = 0;
+    debug!("Starting to fetch Docker registry tags with prefix 'nightly-full-main-'");
+
     loop {
         if num_pages_fetched >= num_pages {
             break;
         }
 
+        debug!("Fetching page {} from URL: {}", num_pages_fetched + 1, url);
         let response: Value = reqwest::get(&url).await?.json().await?;
         let results = response["results"].as_array().unwrap();
+        debug!("Received {} results from Docker registry", results.len());
+
         let mut tag_results: Vec<Tag> = results
             .iter()
             .filter_map(|t| match serde_json::from_value::<Tag>(t.clone()) {
                 Ok(tag) => {
-                    if let Some(sha) = tag.name.split('-').nth(2) {
-                        // Skip the 'main' tag that has no sha
-                        // This floats around and isn't useful to us
-                        if sha.is_empty() {
-                            return None;
-                        }
+                    // Only keep tags ending with -jmx
+                    if !tag.name.ends_with("-jmx") {
+                        debug!("Skipping tag not ending with -jmx: {}", tag.name);
+                        return None;
                     }
 
+                    // Check SHA is valid
+                    if tag.get_sha().is_none() {
+                        debug!("Skipping tag with invalid SHA format: {}", tag.name);
+                        return None;
+                    }
+
+                    debug!("Found valid nightly-full tag: {}", tag.name);
                     Some(tag)
                 }
                 Err(e) => {
@@ -225,6 +230,12 @@ pub async fn fetch_docker_registry_tags(num_pages: usize) -> Result<Vec<Tag>, Ni
                 }
             })
             .collect::<Vec<_>>();
+
+        debug!(
+            "Processed {} valid nightly-full tags from response",
+            tag_results.len()
+        );
+
         tags.append(&mut tag_results);
 
         if response["next"].is_null() {
@@ -234,6 +245,7 @@ pub async fn fetch_docker_registry_tags(num_pages: usize) -> Result<Vec<Tag>, Ni
         num_pages_fetched += 1;
     }
 
+    debug!("Fetched a total of {} nightly-full tags", tags.len());
     Ok(tags)
 }
 
@@ -254,29 +266,17 @@ pub fn query_range(
     r
 }
 
-/// Print the given nightly and optionally all tags
+/// Print the given nightly
 ///
-/// # Panics:
-/// - If the writer encounters an error
-/// - If the nightly is missing a valid image
+/// # Panics
+/// - If the writer encounters an error while writing output
 pub fn print<W>(mut writer: W, nightly: &Nightly, all_tags: bool, print_digest: bool)
 where
     W: std::io::Write,
 {
-    let first_valid_image = nightly
-        .py3
-        .as_ref()
-        .or(nightly.py2.as_ref())
-        .or(nightly.py3_jmx.as_ref())
-        .or(nightly.py2_jmx.as_ref())
-        .or(nightly.jmx.as_ref())
-        .unwrap();
-    writeln!(
-        writer,
-        "Nightly: datadog/agent-dev:{},\t",
-        first_valid_image.name
-    )
-    .expect("Error writing to writer");
+    writeln!(writer, "Nightly: datadog/agent-dev:{},\t", nightly.tag.name)
+        .expect("Error writing to writer");
+
     if let Some(sha_timestamp) = nightly.sha_timestamp {
         writeln!(writer, "SHA Timestamp: {}\t", sha_timestamp.to_rfc3339())
             .expect("Error writing nightly to writer");
@@ -289,43 +289,27 @@ where
     .expect("Error writing nightly to writer");
 
     if all_tags {
-        if let Some(tag) = &nightly.jmx {
-            print_tag(&mut writer, tag, all_tags, print_digest);
-        }
-        if let Some(tag) = &nightly.py3_jmx {
-            print_tag(&mut writer, tag, all_tags, print_digest);
-        }
-        if let Some(tag) = &nightly.py2_jmx {
-            print_tag(&mut writer, tag, all_tags, print_digest);
-        }
-        if let Some(tag) = &nightly.py3 {
-            print_tag(&mut writer, tag, all_tags, print_digest);
-        }
-        if let Some(tag) = &nightly.py2 {
-            print_tag(&mut writer, tag, all_tags, print_digest);
-        }
+        print_tag(&mut writer, &nightly.tag, print_digest);
     }
 }
 
-pub fn print_tag<W>(mut writer: W, tag: &Tag, all_tags: bool, print_digest: bool)
+pub fn print_tag<W>(mut writer: W, tag: &Tag, print_digest: bool)
 where
     W: std::io::Write,
 {
-    if all_tags || tag.name.ends_with("-py3") {
-        let last_pushed = tag.last_pushed.to_rfc3339();
-        write!(
-            writer,
-            "Tag: datadog/agent-dev:{},\tLast Pushed: {}",
-            tag.name, last_pushed,
-        )
-        .expect("Error writing tag to writer");
+    let last_pushed = tag.last_pushed.to_rfc3339();
+    write!(
+        writer,
+        "Tag: datadog/agent-dev:{},\tLast Pushed: {}",
+        tag.name, last_pushed,
+    )
+    .expect("Error writing tag to writer");
 
-        if print_digest {
-            write!(writer, ",\tImage Digest: {}", tag.digest).expect("Error writing tag to writer");
-        }
-
-        writeln!(writer).expect("Error writing tag to writer");
+    if print_digest {
+        write!(writer, ",\tImage Digest: {}", tag.digest).expect("Error writing tag to writer");
     }
+
+    writeln!(writer).expect("Error writing tag to writer");
 }
 
 /// Saves the given nightlies to a cache file

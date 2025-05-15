@@ -1,12 +1,11 @@
-use std::fmt::Write;
 use std::io::Write as IoWrite;
 
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{Duration, Utc};
 use clap::Parser;
 use nightlies::{
     nightly::{
         enrich_nightlies, fetch_docker_registry_tags, find_nightly_by_build_sha,
-        load_db_from_cache, print, query_range, save_db_to_cache,
+        load_db_from_cache, print, save_db_to_cache,
     },
     repo::get_first_nightly_containing_change,
     NightlyError,
@@ -15,36 +14,11 @@ use tabwriter::TabWriter;
 use tracing::{info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-fn parse_datetime(s: &str) -> Result<DateTime<Utc>, NightlyError> {
-    let mut err_str = String::new();
-    match DateTime::parse_from_rfc3339(s) {
-        Ok(datetime) => return Ok(datetime.into()),
-        Err(e) => {
-            err_str
-                .write_fmt(format_args!("Error parsing date as RFC3339: {}", e))
-                .unwrap();
-        }
-    }
-    match NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        Ok(date) => {
-            let default_time = NaiveTime::from_hms_opt(0, 0, 0).expect("Invalid time");
-            let datetime = NaiveDateTime::new(date, default_time);
-            return Ok(datetime.and_utc());
-        }
-        Err(e) => {
-            err_str
-                .write_fmt(format_args!("\n Error parsing date as YYYY-MM-DD: {}", e))
-                .unwrap();
-        }
-    }
-    Err(NightlyError::DateParseError(err_str))
-}
-
 /// Lists the most recent agent-dev nightly images and a GH link for each
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Include all tags, not just those ending in -py3
+    /// Show tag details including pushed date and digest
     #[arg(short, long, default_value_t = false)]
     all_tags: bool,
 
@@ -73,14 +47,6 @@ struct Args {
     /// Show only the 2nd most recently published nightly in full URI format
     #[arg(long, default_value_t = false)]
     prev_latest_only: bool,
-
-    /// Start date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
-    #[arg(short, long, value_parser = parse_datetime)]
-    from_date: Option<DateTime<Utc>>,
-
-    /// End date for query (inclusive), format: YYYY-MM-DDTHH:MM:SS
-    #[arg(short, long, value_parser = parse_datetime)]
-    to_date: Option<DateTime<Utc>>,
 }
 
 #[tokio::main]
@@ -98,9 +64,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // TODO the way this should work is that we query pages until we are able to
-    // find the target_sha and/or find results from the 'from_date'
+    // find the target_sha
     // For now I've added in a cli option to specify number of pages
-    // If you don't see the dates you're looking for, try increasing the number of pages
     let num_pages = args.num_registry_pages.unwrap_or(1);
 
     // Fetch tags from docker registry and load from cache file in parallel
@@ -131,16 +96,7 @@ async fn main() -> anyhow::Result<()> {
     if args.latest_only {
         let latest = nightlies.iter().max_by_key(|n| n.sha_timestamp);
         if let Some(latest) = latest {
-            writeln!(
-                &mut tw,
-                "{}",
-                latest
-                    .py3
-                    .as_ref()
-                    .expect("No py3 image found for latest nightly, something is wrong...")
-                    .name
-            )
-            .expect("Error writing to tabwriter");
+            writeln!(&mut tw, "{}", latest.tag.name).expect("Error writing to tabwriter");
         }
         let written = String::from_utf8(tw.into_inner().unwrap()).unwrap();
         print!("{}", written);
@@ -152,36 +108,14 @@ async fn main() -> anyhow::Result<()> {
         nightlies.sort_by(|a, b| a.sha_timestamp.cmp(&b.sha_timestamp));
         let prev_latest = nightlies.get(nightlies.len() - 2);
         if let Some(prev_latest) = prev_latest {
-            writeln!(
-                &mut tw,
-                "{}",
-                prev_latest
-                    .py3
-                    .as_ref()
-                    .expect("No py3 image found for 2nd latest nightly, something is wrong...")
-                    .name
-            )
-            .expect("Error writing to tabwriter");
+            writeln!(&mut tw, "{}", prev_latest.tag.name).expect("Error writing to tabwriter");
         }
         let written = String::from_utf8(tw.into_inner().unwrap()).unwrap();
         print!("{}", written);
         return Ok(());
     }
 
-    // If dates are specified, lets look at that range
-    if let Some(from) = args.from_date {
-        info!(
-            "Querying range: {} - {}",
-            from,
-            args.to_date.unwrap_or(Utc::now())
-        );
-        let mut nightlies: Vec<&nightlies::nightly::Nightly> =
-            query_range(&nightlies, from, args.to_date).collect();
-        nightlies.sort_by(|a, b| a.sha_timestamp.cmp(&b.sha_timestamp));
-        for n in nightlies {
-            print(&mut tw, n, args.all_tags, args.print_digest);
-        }
-    } else if let Some(build_sha) = args.build_sha {
+    if let Some(build_sha) = args.build_sha {
         let nightly = find_nightly_by_build_sha(&nightlies, &build_sha);
         if let Some(nightly) = nightly {
             print(&mut tw, nightly, args.all_tags, args.print_digest);
@@ -196,10 +130,17 @@ async fn main() -> anyhow::Result<()> {
         print(&mut tw, &nightly, args.all_tags, args.print_digest);
     } else {
         // default is to just display the most recent 7 days
-        let mut nightlies: Vec<&nightlies::nightly::Nightly> =
-            query_range(&nightlies, Utc::now() - Duration::days(7), None).collect();
-        nightlies.sort_by(|a, b| a.sha_timestamp.cmp(&b.sha_timestamp));
-        for n in nightlies {
+        let mut nightlies_vec: Vec<&nightlies::nightly::Nightly> = nightlies.iter().collect();
+        nightlies_vec.sort_by(|a, b| a.sha_timestamp.cmp(&b.sha_timestamp));
+        // Only show the last week by default
+        let last_week = nightlies_vec
+            .into_iter()
+            .filter(|n| {
+                let timestamp = n.sha_timestamp.unwrap_or(n.estimated_last_pushed);
+                timestamp > (Utc::now() - Duration::days(7))
+            })
+            .collect::<Vec<_>>();
+        for n in last_week {
             print(&mut tw, n, args.all_tags, args.print_digest);
         }
     }
