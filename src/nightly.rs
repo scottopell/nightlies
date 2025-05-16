@@ -1,5 +1,6 @@
 use crate::{repo::get_commit_timestamp, NightlyError};
 use chrono::{DateTime, Utc};
+use colored::*;
 use once_cell::sync::Lazy;
 use reqwest;
 use serde::{Deserialize, Serialize};
@@ -23,7 +24,7 @@ pub struct Tag {
 
 impl Tag {
     // Updated to extract SHA from nightly-full-main-SHA-jmx format
-    fn get_sha(&self) -> Option<&str> {
+    pub fn get_sha(&self) -> Option<&str> {
         if self.name.starts_with("nightly-full-main-") && self.name.ends_with("-jmx") {
             if let Some(sha) = self.name.split('-').nth(3) {
                 if sha.len() == 8 {
@@ -249,23 +250,6 @@ pub async fn fetch_docker_registry_tags(num_pages: usize) -> Result<Vec<Tag>, Ni
     Ok(tags)
 }
 
-pub fn query_range(
-    nightlies: &[Nightly],
-    from_date: DateTime<Utc>,
-    to_date: Option<DateTime<Utc>>,
-) -> impl Iterator<Item = &Nightly> + '_ {
-    let r = nightlies.iter().filter(move |n| {
-        let nightly_timestamp = n.sha_timestamp.unwrap_or(n.estimated_last_pushed);
-        if let Some(to_date) = to_date {
-            nightly_timestamp <= to_date && nightly_timestamp >= from_date
-        } else {
-            nightly_timestamp >= from_date
-        }
-    });
-
-    r
-}
-
 /// Print the given nightly
 ///
 /// # Panics
@@ -274,42 +258,90 @@ pub fn print<W>(mut writer: W, nightly: &Nightly, all_tags: bool, print_digest: 
 where
     W: std::io::Write,
 {
-    writeln!(writer, "Nightly: datadog/agent-dev:{},\t", nightly.tag.name)
-        .expect("Error writing to writer");
+    // Extract SHA for URI coloring
+    let sha = nightly.tag.get_sha().unwrap_or(&nightly.sha);
 
-    if let Some(sha_timestamp) = nightly.sha_timestamp {
-        writeln!(writer, "SHA Timestamp: {}\t", sha_timestamp.to_rfc3339())
-            .expect("Error writing nightly to writer");
-    }
+    // Get formatted date for the header - using a more human-readable format
+    let date = nightly.tag.last_pushed.format("%B %eth").to_string();
+
+    // Header with date and SHA
     writeln!(
         writer,
-        "GitHub URL: https://github.com/DataDog/datadog-agent/tree/{}",
-        nightly.sha,
+        "{}",
+        format!("┌─ {} Agent Nightly ({})", date.yellow(), sha.bright_blue()).bold()
+    )
+    .expect("Error writing to writer");
+
+    // Add pushed timestamp as a separate row
+    let pushed_time = nightly
+        .tag
+        .last_pushed
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
+    writeln!(
+        writer,
+        "│  {} {}",
+        "Image Pushed At:".cyan(),
+        pushed_time.yellow()
+    )
+    .expect("Error writing to writer");
+
+    // Full image URI as a separate row with only SHA colorized
+    let uri_parts: Vec<&str> = nightly.tag.name.split(sha).collect();
+    writeln!(
+        writer,
+        "│  {} datadog/agent-dev:{}{}{}",
+        "Image URI:".cyan(),
+        uri_parts[0],
+        sha.bright_blue(),
+        uri_parts.get(1).unwrap_or(&"")
+    )
+    .expect("Error writing to writer");
+
+    // SHA info with timestamp
+    if let Some(sha_timestamp) = nightly.sha_timestamp {
+        let formatted_date = sha_timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+        writeln!(
+            writer,
+            "│  {} {}",
+            "SHA Timestamp:".cyan(),
+            formatted_date.yellow()
+        )
+        .expect("Error writing nightly to writer");
+    }
+
+    // GitHub URL
+    writeln!(
+        writer,
+        "│  {} {}{}",
+        "GitHub URL:".cyan(),
+        "https://github.com/DataDog/datadog-agent/tree/".normal(),
+        nightly.sha.bright_blue()
     )
     .expect("Error writing nightly to writer");
 
+    // Additional tag info if requested
     if all_tags {
         print_tag(&mut writer, &nightly.tag, print_digest);
     }
+
+    // Footer for each nightly
+    writeln!(writer, "└─────────────────────────────────────").expect("Error writing to writer");
 }
 
 pub fn print_tag<W>(mut writer: W, tag: &Tag, print_digest: bool)
 where
     W: std::io::Write,
 {
-    let last_pushed = tag.last_pushed.to_rfc3339();
-    write!(
-        writer,
-        "Tag: datadog/agent-dev:{},\tLast Pushed: {}",
-        tag.name, last_pushed,
-    )
-    .expect("Error writing tag to writer");
-
     if print_digest {
-        write!(writer, ",\tImage Digest: {}", tag.digest).expect("Error writing tag to writer");
+        writeln!(
+            writer,
+            "│  {} {}",
+            "Image Digest:".cyan(),
+            tag.digest.bright_magenta()
+        )
+        .expect("Error writing tag to writer");
     }
-
-    writeln!(writer).expect("Error writing tag to writer");
 }
 
 /// Saves the given nightlies to a cache file

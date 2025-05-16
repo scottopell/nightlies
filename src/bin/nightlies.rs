@@ -2,6 +2,7 @@ use std::io::Write as IoWrite;
 
 use chrono::{Duration, Utc};
 use clap::Parser;
+use colored::*;
 use nightlies::{
     nightly::{
         enrich_nightlies, fetch_docker_registry_tags, find_nightly_by_build_sha,
@@ -35,6 +36,14 @@ struct Args {
     /// EXPERIMENTAL - there are known bugs, use at your own risk
     #[arg(long)]
     agent_sha: Option<String>,
+
+    /// Skip git fetch operations (faster but might miss recent updates)
+    #[arg(long, default_value_t = false)]
+    no_fetch: bool,
+
+    /// Force git fetch operations even if recently performed
+    #[arg(long, default_value_t = false)]
+    force_fetch: bool,
 
     /// Number of pages to fetch from the docker registry API
     #[arg(long)]
@@ -96,7 +105,9 @@ async fn main() -> anyhow::Result<()> {
     if args.latest_only {
         let latest = nightlies.iter().max_by_key(|n| n.sha_timestamp);
         if let Some(latest) = latest {
-            writeln!(&mut tw, "{}", latest.tag.name).expect("Error writing to tabwriter");
+            // For latest-only, just show the plain tag name without formatting
+            writeln!(&mut tw, "datadog/agent-dev:{}", latest.tag.name)
+                .expect("Error writing to tabwriter");
         }
         let written = String::from_utf8(tw.into_inner().unwrap()).unwrap();
         print!("{}", written);
@@ -108,7 +119,9 @@ async fn main() -> anyhow::Result<()> {
         nightlies.sort_by(|a, b| a.sha_timestamp.cmp(&b.sha_timestamp));
         let prev_latest = nightlies.get(nightlies.len() - 2);
         if let Some(prev_latest) = prev_latest {
-            writeln!(&mut tw, "{}", prev_latest.tag.name).expect("Error writing to tabwriter");
+            // For prev-latest-only, just show the plain tag name without formatting
+            writeln!(&mut tw, "datadog/agent-dev:{}", prev_latest.tag.name)
+                .expect("Error writing to tabwriter");
         }
         let written = String::from_utf8(tw.into_inner().unwrap()).unwrap();
         print!("{}", written);
@@ -123,15 +136,26 @@ async fn main() -> anyhow::Result<()> {
             warn!("Could not find nightly for build sha: {}", build_sha)
         }
     } else if let Some(sha) = args.agent_sha {
-        let nightly = get_first_nightly_containing_change(&nightlies, &sha)?;
+        let nightly =
+            get_first_nightly_containing_change(&nightlies, &sha, args.no_fetch, args.force_fetch)?;
 
-        writeln!(&mut tw, "The first nightly containing the target sha is:")
-            .expect("Error writing to tabwriter");
+        writeln!(
+            &mut tw,
+            "{}",
+            "The first nightly containing the target sha is:"
+                .yellow()
+                .bold()
+        )
+        .expect("Error writing to tabwriter");
         print(&mut tw, &nightly, args.all_tags, args.print_digest);
     } else {
         // default is to just display the most recent 7 days
         let mut nightlies_vec: Vec<&nightlies::nightly::Nightly> = nightlies.iter().collect();
-        nightlies_vec.sort_by(|a, b| a.sha_timestamp.cmp(&b.sha_timestamp));
+        nightlies_vec.sort_by(|a, b| {
+            let a_time = a.sha_timestamp.unwrap_or(a.estimated_last_pushed);
+            let b_time = b.sha_timestamp.unwrap_or(b.estimated_last_pushed);
+            a_time.cmp(&b_time)
+        });
         // Only show the last week by default
         let last_week = nightlies_vec
             .into_iter()
@@ -140,6 +164,25 @@ async fn main() -> anyhow::Result<()> {
                 timestamp > (Utc::now() - Duration::days(7))
             })
             .collect::<Vec<_>>();
+
+        if !last_week.is_empty() {
+            writeln!(
+                &mut tw,
+                "{}",
+                format!("Showing {} nightlies from the past week:", last_week.len())
+                    .cyan()
+                    .bold()
+            )
+            .expect("Error writing to tabwriter");
+        } else {
+            writeln!(
+                &mut tw,
+                "{}",
+                "No nightlies found for the past week.".yellow()
+            )
+            .expect("Error writing to tabwriter");
+        }
+
         for n in last_week {
             print(&mut tw, n, args.all_tags, args.print_digest);
         }
