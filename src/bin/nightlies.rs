@@ -12,7 +12,7 @@ use nightlies::{
     NightlyError,
 };
 use tabwriter::TabWriter;
-use tracing::{info, level_filters::LevelFilter, warn};
+use tracing::{debug, info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// Lists the most recent agent-dev nightly images and a GH link for each
@@ -84,18 +84,18 @@ async fn main() -> anyhow::Result<()> {
     // 2. Load nightlies from cache file
     // 3. Start the git fetch to refresh the git repository
     let fetch_start = std::time::Instant::now();
-    info!("Starting parallel operations at {:?}", chrono::Utc::now());
+    debug!("Starting parallel operations at {:?}", chrono::Utc::now());
 
     let (live_tags, file_nightlies, _) = tokio::join!(
         tokio::spawn(async move {
             let task_start = std::time::Instant::now();
-            info!(
+            debug!(
                 "TASK START: fetch_docker_registry_tags at {:?}",
                 chrono::Utc::now()
             );
             let tags = fetch_docker_registry_tags(num_pages).await?;
             let task_end = std::time::Instant::now();
-            info!(
+            debug!(
                 "TASK END: fetch_docker_registry_tags at {:?}, duration: {:?}",
                 chrono::Utc::now(),
                 task_end.duration_since(task_start)
@@ -104,10 +104,10 @@ async fn main() -> anyhow::Result<()> {
         }),
         tokio::spawn(async move {
             let task_start = std::time::Instant::now();
-            info!("TASK START: load_db_from_cache at {:?}", chrono::Utc::now());
+            debug!("TASK START: load_db_from_cache at {:?}", chrono::Utc::now());
             let nightlies = load_db_from_cache()?;
             let task_end = std::time::Instant::now();
-            info!(
+            debug!(
                 "TASK END: load_db_from_cache at {:?}, duration: {:?}",
                 chrono::Utc::now(),
                 task_end.duration_since(task_start)
@@ -117,11 +117,11 @@ async fn main() -> anyhow::Result<()> {
         // Don't spawn this in another task - run it directly within join!
         async move {
             let task_start = std::time::Instant::now();
-            info!("TASK START: start_git_fetch at {:?}", chrono::Utc::now());
+            debug!("TASK START: start_git_fetch at {:?}", chrono::Utc::now());
             // Start the git fetch in the background
             let result = start_git_fetch(no_fetch, force_fetch).await;
             let task_end = std::time::Instant::now();
-            info!(
+            debug!(
                 "TASK END: start_git_fetch at {:?}, duration: {:?}",
                 chrono::Utc::now(),
                 task_end.duration_since(task_start)
@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let fetch_end = std::time::Instant::now();
-    info!(
+    debug!(
         "All parallel operations completed at {:?}, total duration: {:?}",
         chrono::Utc::now(),
         fetch_end.duration_since(fetch_start)

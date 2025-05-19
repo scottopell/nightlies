@@ -98,7 +98,7 @@ async fn run_git_fetch_command(repo_path: &Path) -> Result<()> {
 
     // Record start time
     let start_time = std::time::Instant::now();
-    info!("SUBPROCESS START: git fetch at {:?}", chrono::Utc::now());
+    debug!("SUBPROCESS START: git fetch at {:?}", chrono::Utc::now());
 
     // Execute the command asynchronously
     let output = cmd.output().await.map_err(|e| {
@@ -109,7 +109,7 @@ async fn run_git_fetch_command(repo_path: &Path) -> Result<()> {
     // Record end time and calculate duration
     let end_time = std::time::Instant::now();
     let duration = end_time.duration_since(start_time);
-    info!(
+    debug!(
         "SUBPROCESS END: git fetch at {:?}, duration: {:?}",
         chrono::Utc::now(),
         duration
