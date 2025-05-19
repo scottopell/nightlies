@@ -52,28 +52,20 @@ static CACHE_FILE: Lazy<PathBuf> = Lazy::new(|| {
     dir.join("agent_nightlies.json")
 });
 
-pub fn find_nightly_by_build_sha<'a, 'b>(
-    nightlies: &'a [Nightly],
-    build_sha: &'b str,
-) -> Option<&'a Nightly>
+pub fn find_nightly_by_sha<'a, 'b>(nightlies: &'a [Nightly], sha: &'b str) -> Option<&'a Nightly>
 where
     'b: 'a,
 {
-    info!("Searching for nightly image with sha: {}", build_sha);
-    nightlies
-        .iter()
-        .find(move |nightly| nightly.sha == build_sha)
+    info!("Searching for nightly image with sha: {}", sha);
+    nightlies.iter().find(move |nightly| nightly.sha == sha)
 }
 
-pub fn find_tags_by_build_sha<'a, 'b>(
-    tags: &'a [Tag],
-    build_sha: &'b str,
-) -> impl Iterator<Item = &'a Tag> + 'a
+pub fn find_tags_by_sha<'a, 'b>(tags: &'a [Tag], sha: &'b str) -> impl Iterator<Item = &'a Tag> + 'a
 where
     'b: 'a,
 {
-    info!("Searching for tag with build sha: {}", build_sha);
-    tags.iter().filter(move |t| t.name.contains(build_sha))
+    info!("Searching for tag with sha: {}", sha);
+    tags.iter().filter(move |t| t.name.contains(sha))
 }
 
 /// Given a list of tags, find any tags that represent nightlies

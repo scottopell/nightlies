@@ -5,8 +5,7 @@ use clap::Parser;
 use colored::*;
 use nightlies::{
     nightly::{
-        enrich_nightlies, fetch_docker_registry_tags, find_nightly_by_build_sha,
-        load_db_from_cache, print, save_db_to_cache,
+        enrich_nightlies, fetch_docker_registry_tags, load_db_from_cache, print, save_db_to_cache,
     },
     repo::{get_first_nightly_containing_change, start_git_fetch},
     NightlyError,
@@ -26,10 +25,6 @@ struct Args {
     /// Print the image digest for each tag
     #[arg(short, long, default_value_t = false)]
     print_digest: bool,
-
-    /// If the given build_sha exists as a nightly, print the tag
-    #[arg(long)]
-    build_sha: Option<String>,
 
     /// Given a sha that exists in the 'main' branch of the datadog-agent repo, print
     /// the first nightly that contains that sha
@@ -179,14 +174,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if let Some(build_sha) = args.build_sha {
-        let nightly = find_nightly_by_build_sha(&nightlies, &build_sha);
-        if let Some(nightly) = nightly {
-            print(&mut tw, nightly, args.all_tags, args.print_digest);
-        } else {
-            warn!("Could not find nightly for build sha: {}", build_sha)
-        }
-    } else if let Some(sha) = args.agent_sha {
+    if let Some(sha) = args.agent_sha {
         let nightly = get_first_nightly_containing_change(&nightlies, &sha)?;
 
         writeln!(
