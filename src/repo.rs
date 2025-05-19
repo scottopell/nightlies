@@ -6,6 +6,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 
 use gix::{Commit, Id, Repository};
+use tokio::process::Command as TokioCommand;
 use tracing::{debug, info, warn};
 
 use crate::{nightly::Nightly, NightlyError};
@@ -26,34 +27,121 @@ fn get_agent_repo_path() -> Result<PathBuf> {
 
 fn open_git_repo() -> Result<Repository> {
     let repo_path = get_agent_repo_path()?;
-    debug!("Opening Git repository at {}", repo_path.display());
 
     let repo = gix::open(repo_path)?;
 
     Ok(repo)
 }
 
-/// Open and fetch the git repo only if needed
-fn open_git_repo_with_fetch(no_fetch: bool, force_fetch: bool) -> Result<Repository> {
-    let repo = open_git_repo()?;
-
+/// Starts a git fetch operation asynchronously
+///
+/// # Errors
+/// - If the repository path cannot be determined
+/// - If the git repository cannot be opened
+/// - If the fetch operation fails
+///
+/// # Panics
+/// - This function will not panic directly, but may panic if the tokio runtime is not available
+pub async fn start_git_fetch(no_fetch: bool, force_fetch: bool) -> Result<()> {
     if no_fetch {
         debug!("Skipping fetch due to no_fetch flag");
-        return Ok(repo);
+        return Ok(());
     }
 
-    // Check if we need to fetch from remote or if it's forced
-    if force_fetch || should_fetch(&repo) {
-        // Fetch from default remote (usually 'origin')
-        match fetch_default_remote(&repo) {
-            Ok(()) => info!("Successfully fetched from default remote"),
-            Err(e) => warn!("Failed to fetch from default remote: {}", e),
+    // Get repository path and check if we need to fetch
+    let repo_path = get_agent_repo_path()?;
+    let should_do_fetch = {
+        // Open repo to check if we need to fetch, but don't keep it open
+        let repo = open_git_repo()?;
+        force_fetch || should_fetch(&repo)
+    };
+
+    if should_do_fetch {
+        // Run the fetch command and await its completion
+        debug!("Starting git fetch operation");
+
+        // Execute the git fetch operation and await it
+        run_git_fetch_command(&repo_path).await?;
+
+        // After fetch completes, update the timestamp
+        if let Ok(repo) = open_git_repo() {
+            if let Err(e) = update_fetch_timestamp(&repo) {
+                warn!("Failed to update fetch timestamp: {}", e);
+            }
         }
     } else {
         debug!("Skipping fetch as it was recently performed");
     }
 
-    Ok(repo)
+    Ok(())
+}
+
+/// Run git fetch as a standalone command
+async fn run_git_fetch_command(repo_path: &Path) -> Result<()> {
+    debug!(
+        "Starting async git fetch operation from repo path: {}",
+        repo_path.display()
+    );
+
+    // Create a command to run git fetch using tokio's async Command
+    let mut cmd = TokioCommand::new("git");
+    cmd.current_dir(repo_path)
+        .arg("fetch")
+        .arg("--quiet") // Suppress output unless there's an error
+        .arg("--no-tags")
+        .arg("origin")
+        .arg("refs/heads/main:refs/remotes/origin/main");
+
+    debug!(
+        "Executing async command: git fetch --quiet --no-tags origin refs/heads/main:refs/remotes/origin/main"
+    );
+
+    // Record start time
+    let start_time = std::time::Instant::now();
+    info!("SUBPROCESS START: git fetch at {:?}", chrono::Utc::now());
+
+    // Execute the command asynchronously
+    let output = cmd.output().await.map_err(|e| {
+        warn!("Failed to execute async git fetch command: {}", e);
+        anyhow::anyhow!("Failed to execute async git fetch command: {}", e)
+    })?;
+
+    // Record end time and calculate duration
+    let end_time = std::time::Instant::now();
+    let duration = end_time.duration_since(start_time);
+    info!(
+        "SUBPROCESS END: git fetch at {:?}, duration: {:?}",
+        chrono::Utc::now(),
+        duration
+    );
+
+    if output.status.success() {
+        // Only log output if there's actually something to log
+        if !output.stdout.is_empty() {
+            debug!(
+                "Git fetch stdout: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+
+        if !output.stderr.is_empty() {
+            // Git often writes progress to stderr, so use debug level
+            debug!(
+                "Git fetch stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        debug!("Fetch completed successfully");
+        Ok(())
+    } else {
+        let error_msg = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            "Git fetch failed with status {}: {}",
+            output.status, error_msg
+        );
+        Err(anyhow::anyhow!("Git fetch failed: {}", error_msg))
+    }
 }
 
 // Check if we should perform a fetch based on time since last fetch
@@ -102,114 +190,40 @@ fn update_fetch_timestamp(repo: &Repository) -> Result<()> {
     Ok(())
 }
 
-/// Fetch from the default remote (usually 'origin')
-fn fetch_default_remote(repo: &Repository) -> Result<()> {
-    // Find default remote for fetch direction
-    debug!("Looking for default remote for fetch operation");
-    let remote_name =
-        if let Some(remote_result) = repo.find_default_remote(gix::remote::Direction::Fetch) {
-            let remote = remote_result?;
-            let name = remote
-                .name()
-                .map_or_else(|| "<unnamed>".to_string(), |n| n.as_bstr().to_string());
-
-            let url = remote
-                .url(gix::remote::Direction::Fetch)
-                .map_or_else(|| "<unknown>".to_string(), |u| u.to_bstring().to_string());
-
-            debug!("Found default remote '{}' with URL '{}'", name, url);
-            name
-        } else {
-            warn!("No default remote configured for fetch");
-            return Err(anyhow::anyhow!("No default remote configured for fetch"));
-        };
-
-    // Configure fetch operation and execute it
-    info!("Fetching updates from remote {}", remote_name);
-
-    // Execute a git fetch command via gix
-    debug!(
-        "Starting git fetch operation from repo path: {}",
-        repo.path().display()
-    );
-
-    // Create a command to run git fetch
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(repo.path())
-        .arg("fetch")
-        .arg("--quiet") // Suppress output unless there's an error
-        .arg("--no-tags")
-        .arg(&remote_name)
-        .arg("refs/heads/main:refs/remotes/origin/main");
-
-    debug!(
-        "Executing command: git fetch --quiet --no-tags {} refs/heads/main:refs/remotes/origin/main",
-        remote_name
-    );
-
-    // Execute the command
-    let _output = match cmd.output() {
-        Ok(output) => {
-            if output.status.success() {
-                // Only log output if there's actually something to log
-                if !output.stdout.is_empty() {
-                    debug!(
-                        "Git fetch stdout: {}",
-                        String::from_utf8_lossy(&output.stdout)
-                    );
-                }
-
-                if !output.stderr.is_empty() {
-                    // Git often writes progress to stderr, so use debug level
-                    debug!(
-                        "Git fetch stderr: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-
-                info!("Git fetch completed successfully");
-
-                // Update the fetch timestamp
-                if let Err(e) = update_fetch_timestamp(repo) {
-                    warn!("Failed to update fetch timestamp: {}", e);
-                }
-
-                output
-            } else {
-                let error_msg = String::from_utf8_lossy(&output.stderr);
-                warn!(
-                    "Git fetch failed with status {}: {}",
-                    output.status, error_msg
-                );
-                return Err(anyhow::anyhow!("Git fetch failed: {}", error_msg));
-            }
-        }
-        Err(e) => {
-            warn!("Failed to execute git fetch command: {}", e);
-            return Err(anyhow::anyhow!(
-                "Failed to execute git fetch command: {}",
-                e
-            ));
-        }
-    };
-
-    debug!("Fetch completed successfully");
-    Ok(())
-}
-
 /// Starting from the given branch, walk backwards until we find the commit with the given sha
 fn get_commit_by_sha<'a>(
     repo: &'a Repository,
     sha: &str,
     branch_id: &Id,
 ) -> Result<Option<Commit<'a>>> {
+    // Record start time
+    let start_time = std::time::Instant::now();
+    info!(
+        "SUBPROCESS START: git commit lookup for {} at {:?}",
+        sha,
+        chrono::Utc::now()
+    );
+
     let commit_oid = match repo.rev_parse_single(sha) {
         Ok(obj) => obj,
         Err(e) => {
             warn!("Error finding sha: {}", e);
+            // Record end time for error case too
+            let end_time = std::time::Instant::now();
+            let duration = end_time.duration_since(start_time);
+            info!(
+                "SUBPROCESS END: git commit lookup (error) at {:?}, duration: {:?}",
+                chrono::Utc::now(),
+                duration
+            );
             return Ok(None);
         }
     };
+
+    // Record time after SHA lookup
+    let sha_lookup_time = std::time::Instant::now();
+    let sha_duration = sha_lookup_time.duration_since(start_time);
+    debug!("SHA lookup completed in {:?}", sha_duration);
 
     let revwalk = repo
         .rev_walk(Some(branch_id.detach()))
@@ -222,12 +236,33 @@ fn get_commit_by_sha<'a>(
     // revwalk will now walk backwards from the specified branch
     // until we find our target commit
 
+    // Count iterations for debugging
+    let mut iterations = 0;
+
     for rev in revwalk {
+        iterations += 1;
         let cm = rev.object()?;
         if cm.id() == commit_oid {
+            // Record end time for success case
+            let end_time = std::time::Instant::now();
+            let duration = end_time.duration_since(start_time);
+            let walk_duration = end_time.duration_since(sha_lookup_time);
+            info!(
+                "SUBPROCESS END: git commit lookup (found after {} iterations) at {:?}, total duration: {:?}, walk duration: {:?}",
+                iterations, chrono::Utc::now(), duration, walk_duration
+            );
             return Ok(Some(cm));
         }
     }
+
+    // Record end time for not found case
+    let end_time = std::time::Instant::now();
+    let duration = end_time.duration_since(start_time);
+    let walk_duration = end_time.duration_since(sha_lookup_time);
+    info!(
+        "SUBPROCESS END: git commit lookup (not found after {} iterations) at {:?}, total duration: {:?}, walk duration: {:?}",
+        iterations, chrono::Utc::now(), duration, walk_duration
+    );
 
     Ok(None)
 }
@@ -253,7 +288,9 @@ fn print_friendly_git_may_be_stale_warning(target_sha: &str) {
 /// - If the git repo cannot be opened
 /// - If the commit timestamp cannot be parsed
 pub fn get_commit_timestamp(target_sha: &str) -> Result<DateTime<Utc>> {
-    let repo = open_git_repo_with_fetch(false, false)?;
+    // Use simple open_git_repo instead of open_git_repo_with_fetch to avoid duplicate fetching
+    // since start_git_fetch() is already called in the main program flow
+    let repo = open_git_repo()?;
     let origin_main = repo
         .find_reference("refs/remotes/origin/main")?
         .into_fully_peeled_id()?;
@@ -285,10 +322,8 @@ pub fn get_commit_timestamp(target_sha: &str) -> Result<DateTime<Utc>> {
 pub fn get_first_nightly_containing_change(
     nightlies: &[Nightly],
     change_sha: &str,
-    no_fetch: bool,
-    force_fetch: bool,
 ) -> Result<Nightly> {
-    let repo = open_git_repo_with_fetch(no_fetch, force_fetch)?;
+    let repo = open_git_repo()?;
     let origin_main = repo
         .find_reference("refs/remotes/origin/main")?
         .into_fully_peeled_id()?;
@@ -364,17 +399,30 @@ pub fn get_first_nightly_containing_change(
             }
         };
 
+        // Time the commit history traversal
+        let start_time = std::time::Instant::now();
+        info!(
+            "SUBPROCESS START: commit history traversal at {:?}",
+            chrono::Utc::now()
+        );
+
         // Use the simple approach of walking the commit history
-        if let Some(_commit) = get_commit_by_sha(&repo, change_sha, &nightly_obj)? {
+        let result = get_commit_by_sha(&repo, change_sha, &nightly_obj)?;
+
+        // Record end time and duration
+        let end_time = std::time::Instant::now();
+        let duration = end_time.duration_since(start_time);
+        info!(
+            "SUBPROCESS END: commit history traversal at {:?}, duration: {:?}",
+            chrono::Utc::now(),
+            duration
+        );
+
+        if let Some(_commit) = result {
             containing_nightly = Some(nightly.clone());
             debug!("Found target commit in nightly {}", nightly.sha);
             // Since we're sorted by oldest first, we can break at first match
             break;
-        } else {
-            debug!(
-                "Didn't find commit: {} in nightly: {}",
-                change_sha, nightly.sha
-            );
         }
     }
 

@@ -8,7 +8,7 @@ use nightlies::{
         enrich_nightlies, fetch_docker_registry_tags, find_nightly_by_build_sha,
         load_db_from_cache, print, save_db_to_cache,
     },
-    repo::get_first_nightly_containing_change,
+    repo::{get_first_nightly_containing_change, start_git_fetch},
     NightlyError,
 };
 use tabwriter::TabWriter;
@@ -58,7 +58,7 @@ struct Args {
     prev_latest_only: bool,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
@@ -76,17 +76,68 @@ async fn main() -> anyhow::Result<()> {
     // find the target_sha
     // For now I've added in a cli option to specify number of pages
     let num_pages = args.num_registry_pages.unwrap_or(1);
+    let no_fetch = args.no_fetch;
+    let force_fetch = args.force_fetch;
 
-    // Fetch tags from docker registry and load from cache file in parallel
-    let (live_tags, file_nightlies) = tokio::join!(
+    // Start all three operations in parallel:
+    // 1. Fetch tags from Docker registry
+    // 2. Load nightlies from cache file
+    // 3. Start the git fetch to refresh the git repository
+    let fetch_start = std::time::Instant::now();
+    info!("Starting parallel operations at {:?}", chrono::Utc::now());
+
+    let (live_tags, file_nightlies, _) = tokio::join!(
         tokio::spawn(async move {
+            let task_start = std::time::Instant::now();
+            info!(
+                "TASK START: fetch_docker_registry_tags at {:?}",
+                chrono::Utc::now()
+            );
             let tags = fetch_docker_registry_tags(num_pages).await?;
+            let task_end = std::time::Instant::now();
+            info!(
+                "TASK END: fetch_docker_registry_tags at {:?}, duration: {:?}",
+                chrono::Utc::now(),
+                task_end.duration_since(task_start)
+            );
             Ok::<_, crate::NightlyError>(tags)
         }),
         tokio::spawn(async move {
+            let task_start = std::time::Instant::now();
+            info!("TASK START: load_db_from_cache at {:?}", chrono::Utc::now());
             let nightlies = load_db_from_cache()?;
+            let task_end = std::time::Instant::now();
+            info!(
+                "TASK END: load_db_from_cache at {:?}, duration: {:?}",
+                chrono::Utc::now(),
+                task_end.duration_since(task_start)
+            );
             Ok::<_, crate::NightlyError>(nightlies)
-        })
+        }),
+        // Don't spawn this in another task - run it directly within join!
+        async move {
+            let task_start = std::time::Instant::now();
+            info!("TASK START: start_git_fetch at {:?}", chrono::Utc::now());
+            // Start the git fetch in the background
+            let result = start_git_fetch(no_fetch, force_fetch).await;
+            let task_end = std::time::Instant::now();
+            info!(
+                "TASK END: start_git_fetch at {:?}, duration: {:?}",
+                chrono::Utc::now(),
+                task_end.duration_since(task_start)
+            );
+            if let Err(e) = result {
+                warn!("Error starting git fetch: {}", e);
+            }
+            Ok::<_, crate::NightlyError>(())
+        }
+    );
+
+    let fetch_end = std::time::Instant::now();
+    info!(
+        "All parallel operations completed at {:?}, total duration: {:?}",
+        chrono::Utc::now(),
+        fetch_end.duration_since(fetch_start)
     );
     let live_tags = live_tags??;
     let mut nightlies = file_nightlies??;
@@ -136,8 +187,7 @@ async fn main() -> anyhow::Result<()> {
             warn!("Could not find nightly for build sha: {}", build_sha)
         }
     } else if let Some(sha) = args.agent_sha {
-        let nightly =
-            get_first_nightly_containing_change(&nightlies, &sha, args.no_fetch, args.force_fetch)?;
+        let nightly = get_first_nightly_containing_change(&nightlies, &sha)?;
 
         writeln!(
             &mut tw,

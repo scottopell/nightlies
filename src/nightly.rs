@@ -1,6 +1,6 @@
 use crate::{repo::get_commit_timestamp, NightlyError};
 use chrono::{DateTime, Utc};
-use colored::*;
+use colored::Colorize;
 use once_cell::sync::Lazy;
 use reqwest;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 // Updated URL for nightly-full tags
 const URL: &str = "https://hub.docker.com/v2/repositories/datadog/agent-dev/tags";
@@ -24,6 +24,7 @@ pub struct Tag {
 
 impl Tag {
     // Updated to extract SHA from nightly-full-main-SHA-jmx format
+    #[must_use]
     pub fn get_sha(&self) -> Option<&str> {
         if self.name.starts_with("nightly-full-main-") && self.name.ends_with("-jmx") {
             if let Some(sha) = self.name.split('-').nth(3) {
@@ -90,7 +91,7 @@ pub fn enrich_nightlies(tags: &[Tag], nightlies: &mut Vec<Nightly>) -> Result<()
         .iter()
         .filter(|tag| {
             let has_sha = tag.get_sha().is_some();
-            debug!("Tag {}: has_sha={}", tag.name, has_sha);
+            trace!("Tag {}: has_sha={}", tag.name, has_sha);
             has_sha
         })
         .collect();
@@ -98,10 +99,12 @@ pub fn enrich_nightlies(tags: &[Tag], nightlies: &mut Vec<Nightly>) -> Result<()
     debug!("Found {} valid nightly-full tags", valid_tags.len());
 
     for tag in valid_tags {
-        let sha = tag.get_sha().unwrap();
+        let Some(sha) = tag.get_sha() else {
+            unreachable!("Tag {} missing SHA, but just validated it.", tag.name);
+        };
         // Skip if we already have this nightly
         if nightlies.iter().any(|n| n.sha == sha) {
-            debug!("Skipping already tracked nightly for SHA: {}", sha);
+            trace!("Skipping already tracked nightly for SHA: {}", sha);
             continue;
         }
 
@@ -151,7 +154,9 @@ pub fn tags_to_nightlies(tags: &[Tag]) -> Vec<Nightly> {
     debug!("Found {} valid nightly-full tags", valid_tags.len());
 
     for tag in valid_tags {
-        let sha = tag.get_sha().unwrap();
+        let Some(sha) = tag.get_sha() else {
+            unreachable!("Tag {} missing SHA, but just validated it.", tag.name);
+        };
 
         let sha_timestamp = match get_commit_timestamp(sha) {
             Ok(timestamp) => Some(timestamp),
@@ -222,7 +227,7 @@ pub async fn fetch_docker_registry_tags(num_pages: usize) -> Result<Vec<Tag>, Ni
                         return None;
                     }
 
-                    debug!("Found valid nightly-full tag: {}", tag.name);
+                    trace!("Found valid nightly-full tag: {}", tag.name);
                     Some(tag)
                 }
                 Err(e) => {
