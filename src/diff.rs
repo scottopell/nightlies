@@ -44,14 +44,22 @@ async fn get_commit_stats(sha: &str, repo_path: PathBuf) -> Result<(u32, u32)> {
     // Run git show with shortstat and empty format to only get stats lines
     let output = git_command(&["show", "--shortstat", "--format=", sha], repo_path).await?;
 
-    static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?P<ins>\d+) insertion[\w\(\)\+]*,?\s*(?P<del>\d+) deletion").unwrap()
-    });
+    // Separate regexes for insertion and deletion counts (handles singular/plural)
+    static INS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?P<num>\d+) insertion(?:s)?").unwrap());
+    static DEL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?P<num>\d+) deletion(?:s)?").unwrap());
 
     for line in output.lines() {
-        if let Some(caps) = RE.captures(line) {
-            let ins: u32 = caps["ins"].parse().unwrap_or(0);
-            let del: u32 = caps["del"].parse().unwrap_or(0);
+        let ins: u32 = INS_RE
+            .captures(line)
+            .and_then(|c| c.name("num"))
+            .map_or(0, |m| m.as_str().parse().unwrap_or(0));
+
+        let del: u32 = DEL_RE
+            .captures(line)
+            .and_then(|c| c.name("num"))
+            .map_or(0, |m| m.as_str().parse().unwrap_or(0));
+
+        if ins > 0 || del > 0 {
             return Ok((ins, del));
         }
     }
@@ -116,15 +124,30 @@ pub async fn show_diff_between_latest_two(
 
     let commit_lines: Vec<&str> = commits_output.lines().collect();
     println!("│ {} commits:", commit_lines.len());
+
+    // Regex to identify PR references like "(#12345)" in commit messages
+    static PR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(#(?P<num>\d+)\)").unwrap());
+
     for line in commit_lines.iter().take(25) {
+        // First token is the SHA
         let sha = line.split_whitespace().next().unwrap_or("");
+
+        // Build commit line with optional PR link
+        let mut decorated_line = line.to_string();
+        if let Some(caps) = PR_RE.captures(line) {
+            let pr_num = &caps["num"];
+            let pr_url = format!("https://github.com/DataDog/datadog-agent/pull/{}", pr_num);
+            decorated_line.push(' ');
+            decorated_line.push_str(&pr_url);
+        }
+
         match get_commit_stats(sha, repo_path.clone()).await {
             Ok((ins, del)) => {
-                println!("│   {} (+{}, -{})", line, ins, del);
+                println!("│   {} (+{}, -{})", decorated_line, ins, del);
             }
             Err(_) => {
                 // Fallback to original line without stats
-                println!("│   {}", line);
+                println!("│   {}", decorated_line);
             }
         }
     }
