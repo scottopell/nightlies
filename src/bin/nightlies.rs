@@ -1,5 +1,6 @@
 use std::io::Write as IoWrite;
 
+use chrono::{Datelike, Weekday};
 use chrono::{Duration, Utc};
 use clap::Parser;
 use colored::*;
@@ -51,6 +52,16 @@ struct Args {
     /// Show only the 2nd most recently published nightly in full URI format
     #[arg(long, default_value_t = false)]
     prev_latest_only: bool,
+
+    /// Include weekend builds (Saturday/Sunday in UTC)
+    #[arg(long, default_value_t = false)]
+    include_weekends: bool,
+}
+
+/// Checks if a timestamp is on a weekend (Saturday or Sunday)
+fn is_weekend(timestamp: &chrono::DateTime<chrono::Utc>) -> bool {
+    let weekday = timestamp.weekday();
+    weekday == Weekday::Sat || weekday == Weekday::Sun
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -198,8 +209,14 @@ async fn main() -> anyhow::Result<()> {
         let last_week = nightlies_vec
             .into_iter()
             .filter(|n| {
+                // For the "last week" check, use SHA timestamp with fallback to estimated_last_pushed
                 let timestamp = n.sha_timestamp.unwrap_or(n.estimated_last_pushed);
+
+                // For the weekend check, use ONLY the estimated_last_pushed (Docker push timestamp)
+                let is_weekend_build = is_weekend(&n.estimated_last_pushed);
+
                 timestamp > (Utc::now() - Duration::days(7))
+                    && (args.include_weekends || !is_weekend_build)
             })
             .collect::<Vec<_>>();
 
@@ -207,16 +224,29 @@ async fn main() -> anyhow::Result<()> {
             writeln!(
                 &mut tw,
                 "{}",
-                format!("Showing {} nightlies from the past week:", last_week.len())
-                    .cyan()
-                    .bold()
+                format!(
+                    "Showing {} nightlies from the past week{}:",
+                    last_week.len(),
+                    if !args.include_weekends {
+                        " (excluding weekend builds by push date)"
+                    } else {
+                        ""
+                    }
+                )
+                .cyan()
+                .bold()
             )
             .expect("Error writing to tabwriter");
         } else {
             writeln!(
                 &mut tw,
                 "{}",
-                "No nightlies found for the past week.".yellow()
+                if !args.include_weekends {
+                    "No nightlies found for the past week (excluding weekend builds by push date)."
+                        .yellow()
+                } else {
+                    "No nightlies found for the past week.".yellow()
+                }
             )
             .expect("Error writing to tabwriter");
         }
