@@ -128,31 +128,66 @@ pub async fn show_diff_between_latest_two(
     // Regex to identify PR references like "(#12345)" in commit messages
     static PR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(#(?P<num>\d+)\)").unwrap());
 
-    for line in commit_lines.iter().take(25) {
+    for line in commit_lines.iter() {
         // First token is the SHA
         let sha = line.split_whitespace().next().unwrap_or("");
 
-        // Build commit line with optional PR link
-        let mut decorated_line = line.to_string();
-        if let Some(caps) = PR_RE.captures(line) {
-            let pr_num = &caps["num"];
-            let pr_url = format!("https://github.com/DataDog/datadog-agent/pull/{}", pr_num);
-            decorated_line.push(' ');
-            decorated_line.push_str(&pr_url);
-        }
+        // Build commit line, removing the "(#1234)" fragment if present
+        let mut base_line = PR_RE.replace(line, "").to_string();
+        base_line = base_line.trim_end().to_string();
 
-        match get_commit_stats(sha, repo_path.clone()).await {
+        // Extract pr link (if present) from original line
+        let pr_link_opt = PR_RE.captures(line).map(|caps| {
+            format!(
+                "https://github.com/DataDog/datadog-agent/pull/{}",
+                &caps["num"]
+            )
+        });
+
+        // Split into SHA and message part
+        let (sha_token, message_part) = base_line
+            .split_once(' ')
+            .map(|(s, rest)| (s, rest.trim()))
+            .unwrap_or((base_line.as_str(), ""));
+
+        // Short SHA (7 chars for aesthetics)
+        let sha_short = if sha_token.len() > 7 {
+            &sha_token[..7]
+        } else {
+            sha_token
+        };
+        let sha_colored = sha_short.cyan();
+
+        // Colored link if present
+        let link_colored = pr_link_opt
+            .as_deref()
+            .map(|l| l.blue().underline().to_string())
+            .unwrap_or_default();
+
+        // Fetch commit stats
+        match get_commit_stats(sha_token, repo_path.clone()).await {
             Ok((ins, del)) => {
-                println!("│   {} (+{}, -{})", decorated_line, ins, del);
+                let plus = format!("+{}", ins).green();
+                let minus = format!("-{}", del).red();
+
+                if link_colored.is_empty() {
+                    println!("│   {} {} ({}, {})", sha_colored, message_part, plus, minus);
+                } else {
+                    println!(
+                        "│   {} {} {} ({}, {})",
+                        sha_colored, message_part, link_colored, plus, minus
+                    );
+                }
             }
             Err(_) => {
-                // Fallback to original line without stats
-                println!("│   {}", decorated_line);
+                // Fallback to original (non-colored) line
+                if link_colored.is_empty() {
+                    println!("│   {} {}", sha_colored, message_part);
+                } else {
+                    println!("│   {} {} {}", sha_colored, message_part, link_colored);
+                }
             }
         }
-    }
-    if commit_lines.len() > 25 {
-        println!("│   …");
     }
 
     println!("│\n│ File summary:");
