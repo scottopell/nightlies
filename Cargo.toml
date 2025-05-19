@@ -21,4 +21,5 @@ tabwriter = "1.4.0"
 gix = "0.62.0"
 anyhow = "1.0.82"
 colored = "3.0.0"
+regex = "1.10.3"
 

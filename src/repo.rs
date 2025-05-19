@@ -14,7 +14,7 @@ use crate::{nightly::Nightly, NightlyError};
 // Cache expiration time for git fetch operations (5 minutes)
 const FETCH_CACHE_EXPIRATION: Duration = Duration::from_secs(5 * 60);
 
-fn get_agent_repo_path() -> Result<PathBuf> {
+pub fn get_agent_repo_path() -> Result<PathBuf> {
     let home = match home::home_dir() {
         Some(path) if !path.as_os_str().is_empty() => Some(path),
         _ => None,

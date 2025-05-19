@@ -27,5 +27,6 @@ pub enum NightlyError {
     GitError(String),
 }
 
+pub mod diff;
 pub mod nightly;
 pub mod repo;

@@ -56,6 +56,10 @@ struct Args {
     /// Include weekend builds (Saturday/Sunday in UTC)
     #[arg(long, default_value_t = false)]
     include_weekends: bool,
+
+    /// Show a concise diff between the two most recent nightlies
+    #[arg(long, default_value_t = false)]
+    diff_nightlies: bool,
 }
 
 /// Checks if a timestamp is on a weekend (Saturday or Sunday)
@@ -159,6 +163,11 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let mut tw = TabWriter::new(vec![]);
+    if args.diff_nightlies {
+        nightlies::diff::show_diff_between_latest_two(&nightlies, args.include_weekends).await?;
+        return Ok(());
+    }
+
     if args.latest_only {
         let latest = nightlies.iter().max_by_key(|n| n.sha_timestamp);
         if let Some(latest) = latest {
