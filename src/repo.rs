@@ -14,6 +14,13 @@ use crate::{nightly::Nightly, NightlyError};
 // Cache expiration time for git fetch operations (5 minutes)
 const FETCH_CACHE_EXPIRATION: Duration = Duration::from_secs(5 * 60);
 
+/// Returns the path to the local datadog-agent repository.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// - The home directory cannot be determined
+/// - The home directory path is empty
 pub fn get_agent_repo_path() -> Result<PathBuf> {
     let home = match home::home_dir() {
         Some(path) if !path.as_os_str().is_empty() => Some(path),

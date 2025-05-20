@@ -2,7 +2,7 @@ use crate::nightly::Nightly;
 use crate::repo::get_agent_repo_path;
 use anyhow::Result;
 use chrono::{Datelike, Weekday};
-use colored::*;
+use colored::Colorize;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::PathBuf;
@@ -41,12 +41,12 @@ async fn git_command(args: &[&str], repo_path: PathBuf) -> Result<String> {
 
 /// Extract insertions and deletions for a commit
 async fn get_commit_stats(sha: &str, repo_path: PathBuf) -> Result<(u32, u32)> {
-    // Run git show with shortstat and empty format to only get stats lines
-    let output = git_command(&["show", "--shortstat", "--format=", sha], repo_path).await?;
-
     // Separate regexes for insertion and deletion counts (handles singular/plural)
     static INS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?P<num>\d+) insertion(?:s)?").unwrap());
     static DEL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?P<num>\d+) deletion(?:s)?").unwrap());
+
+    // Run git show with shortstat and empty format to only get stats lines
+    let output = git_command(&["show", "--shortstat", "--format=", sha], repo_path).await?;
 
     for line in output.lines() {
         let ins: u32 = INS_RE
@@ -72,10 +72,20 @@ async fn get_commit_stats(sha: &str, repo_path: PathBuf) -> Result<(u32, u32)> {
 ///
 /// 1. Chooses the latest two nightlies after applying the `include_weekends` rule.
 /// 2. Prints commit list, file summary and short per-file diffs.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// - There are fewer than two nightlies after filtering
+/// - Git commands fail to execute
+/// - Repository path cannot be found
 pub async fn show_diff_between_latest_two(
     nightlies: &[Nightly],
     include_weekends: bool,
 ) -> Result<()> {
+    // Regex to identify PR references like "(#12345)" in commit messages
+    static PR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(#(?P<num>\d+)\)").unwrap());
+
     // Filter weekend builds if requested
     let mut filtered: Vec<&Nightly> = nightlies
         .iter()
@@ -125,12 +135,9 @@ pub async fn show_diff_between_latest_two(
     let commit_lines: Vec<&str> = commits_output.lines().collect();
     println!("│ {} commits:", commit_lines.len());
 
-    // Regex to identify PR references like "(#12345)" in commit messages
-    static PR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(#(?P<num>\d+)\)").unwrap());
-
-    for line in commit_lines.iter() {
+    for line in &commit_lines {
         // First token is the SHA
-        let sha = line.split_whitespace().next().unwrap_or("");
+        let _sha = line.split_whitespace().next().unwrap_or("");
 
         // Build commit line, removing the "(#1234)" fragment if present
         let mut base_line = PR_RE.replace(line, "").to_string();
@@ -147,8 +154,7 @@ pub async fn show_diff_between_latest_two(
         // Split into SHA and message part
         let (sha_token, message_part) = base_line
             .split_once(' ')
-            .map(|(s, rest)| (s, rest.trim()))
-            .unwrap_or((base_line.as_str(), ""));
+            .map_or((base_line.as_str(), ""), |(s, rest)| (s, rest.trim()));
 
         // Short SHA (7 chars for aesthetics)
         let sha_short = if sha_token.len() > 7 {
@@ -167,24 +173,21 @@ pub async fn show_diff_between_latest_two(
         // Fetch commit stats
         match get_commit_stats(sha_token, repo_path.clone()).await {
             Ok((ins, del)) => {
-                let plus = format!("+{}", ins).green();
-                let minus = format!("-{}", del).red();
+                let plus = format!("+{ins}").green();
+                let minus = format!("-{del}").red();
 
                 if link_colored.is_empty() {
-                    println!("│   {} {} ({}, {})", sha_colored, message_part, plus, minus);
+                    println!("│   {sha_colored} {message_part} ({plus}, {minus})");
                 } else {
-                    println!(
-                        "│   {} {} {} ({}, {})",
-                        sha_colored, message_part, link_colored, plus, minus
-                    );
+                    println!("│   {sha_colored} {message_part} {link_colored} ({plus}, {minus})");
                 }
             }
             Err(_) => {
                 // Fallback to original (non-colored) line
                 if link_colored.is_empty() {
-                    println!("│   {} {}", sha_colored, message_part);
+                    println!("│   {sha_colored} {message_part}");
                 } else {
-                    println!("│   {} {} {}", sha_colored, message_part, link_colored);
+                    println!("│   {sha_colored} {message_part} {link_colored}");
                 }
             }
         }
@@ -202,11 +205,11 @@ pub async fn show_diff_between_latest_two(
             }
         }
 
-        println!("│   {}", line);
+        println!("│   {line}");
     }
 
     if binary_count > 0 {
-        println!("│   ({} binary files changed)", binary_count);
+        println!("│   ({binary_count} binary files changed)");
     }
 
     println!("└─────────────────────────────────────");
