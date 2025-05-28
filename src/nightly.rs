@@ -1,5 +1,5 @@
 use crate::{repo::get_commit_timestamp, NightlyError};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc, Weekday};
 use colored::Colorize;
 use once_cell::sync::Lazy;
 use reqwest;
@@ -377,5 +377,13 @@ pub fn load_db_from_cache() -> Result<Vec<Nightly>, crate::NightlyError> {
             }
             Ok(Vec::new())
         }
+    }
+}
+
+impl Nightly {
+    /// Returns true if this nightly was built on a weekend (Saturday or Sunday in UTC)
+    pub fn is_weekend_build(&self) -> bool {
+        let weekday = self.estimated_last_pushed.weekday();
+        weekday == Weekday::Sat || weekday == Weekday::Sun
     }
 }

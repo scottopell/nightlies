@@ -9,6 +9,9 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::{debug, warn};
 
+/// Regex to identify PR references like "(#12345)" in commit messages
+static PR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(#(?P<num>\d+)\)").unwrap());
+
 /// Returns true if the given timestamp is a Saturday or Sunday (UTC).
 fn is_weekend(ts: &chrono::DateTime<chrono::Utc>) -> bool {
     let weekday = ts.weekday();
@@ -68,44 +71,17 @@ async fn get_commit_stats(sha: &str, repo_path: PathBuf) -> Result<(u32, u32)> {
     Ok((0, 0))
 }
 
-/// Show a concise source diff between the two most-recent nightlies (respecting weekend filter).
-///
-/// 1. Chooses the latest two nightlies after applying the `include_weekends` rule.
-/// 2. Prints commit list, file summary and short per-file diffs.
-///
-/// # Errors
-///
-/// This function will return an error if:
-/// - There are fewer than two nightlies after filtering
-/// - Git commands fail to execute
-/// - Repository path cannot be found
-pub async fn show_diff_between_latest_two(
-    nightlies: &[Nightly],
-    include_weekends: bool,
+/// Internal function to display a diff between two SHAs with consistent formatting
+async fn display_diff(
+    older_sha: &str,
+    newer_sha: &str,
+    older_name: &str,
+    newer_name: &str,
 ) -> Result<()> {
-    // Regex to identify PR references like "(#12345)" in commit messages
-    static PR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(#(?P<num>\d+)\)").unwrap());
-
-    // Filter weekend builds if requested
-    let mut filtered: Vec<&Nightly> = nightlies
-        .iter()
-        .filter(|n| include_weekends || !is_weekend(&n.estimated_last_pushed))
-        .collect();
-
-    // Sort newest first using SHA timestamp when available
-    filtered.sort_by_key(|n| std::cmp::Reverse(n.sha_timestamp.unwrap_or(n.estimated_last_pushed)));
-
-    if filtered.len() < 2 {
-        anyhow::bail!("Need at least two nightlies to compute a diff (after filtering)");
-    }
-
-    let newer = filtered[0];
-    let older = filtered[1];
-
     let repo_path = get_agent_repo_path()?;
 
     // Run git commands sequentially (diff generation is fast enough)
-    let log_range = format!("{}..{}", older.sha, newer.sha);
+    let log_range = format!("{}..{}", older_sha, newer_sha);
 
     let commits_output = git_command(
         &["log", "--oneline", "--no-merges", &log_range],
@@ -113,21 +89,16 @@ pub async fn show_diff_between_latest_two(
     )
     .await?;
 
-    let stat_output = git_command(
-        &["diff", "--stat", older.sha.as_str(), newer.sha.as_str()],
-        repo_path.clone(),
-    )
-    .await?;
-
-    // We fetch only commit log and statistics; file-level patches are omitted per user preference
+    let stat_output =
+        git_command(&["diff", "--stat", older_sha, newer_sha], repo_path.clone()).await?;
 
     // Print final report
     println!(
         "{}",
         format!(
             "┌─ Diff between {} and {}",
-            newer.tag.name.green(),
-            older.tag.name.green()
+            newer_name.green(),
+            older_name.green()
         )
         .bold()
     );
@@ -215,4 +186,47 @@ pub async fn show_diff_between_latest_two(
     println!("└─────────────────────────────────────");
 
     Ok(())
+}
+
+/// Show a concise source diff between the two most-recent nightlies (respecting weekend filter).
+///
+/// 1. Chooses the latest two nightlies after applying the `include_weekends` rule.
+/// 2. Prints commit list, file summary and short per-file diffs.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// - There are fewer than two nightlies after filtering
+/// - Git commands fail to execute
+/// - Repository path cannot be found
+pub async fn show_diff_between_latest_two(
+    nightlies: &[Nightly],
+    include_weekends: bool,
+) -> Result<()> {
+    // Filter weekend builds if requested
+    let mut filtered: Vec<&Nightly> = nightlies
+        .iter()
+        .filter(|n| include_weekends || !is_weekend(&n.estimated_last_pushed))
+        .collect();
+
+    // Sort newest first using SHA timestamp when available
+    filtered.sort_by_key(|n| std::cmp::Reverse(n.sha_timestamp.unwrap_or(n.estimated_last_pushed)));
+
+    if filtered.len() < 2 {
+        anyhow::bail!("Need at least two nightlies to compute a diff (after filtering)");
+    }
+
+    let newer = filtered[0];
+    let older = filtered[1];
+
+    display_diff(&older.sha, &newer.sha, &older.tag.name, &newer.tag.name).await
+}
+
+/// Show a diff between two specific SHAs
+pub async fn show_diff_between_shas(older_sha: String, newer_sha: String) -> Result<()> {
+    // For SHA-based diffs, use the short SHA as the display name
+    let older_name = &older_sha[..7];
+    let newer_name = &newer_sha[..7];
+
+    display_diff(&older_sha, &newer_sha, older_name, newer_name).await
 }

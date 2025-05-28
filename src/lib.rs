@@ -28,5 +28,6 @@ pub enum NightlyError {
 }
 
 pub mod diff;
+pub mod interactive;
 pub mod nightly;
 pub mod repo;

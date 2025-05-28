@@ -60,6 +60,10 @@ struct Args {
     /// Show a concise diff between the two most recent nightlies
     #[arg(long, default_value_t = false)]
     diff_nightlies: bool,
+
+    /// Interactively select nightlies to diff
+    #[arg(long, default_value_t = false)]
+    diff_interactive: bool,
 }
 
 /// Checks if a timestamp is on a weekend (Saturday or Sunday)
@@ -163,6 +167,13 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let mut tw = TabWriter::new(vec![]);
+    if args.diff_interactive {
+        let (older_sha, newer_sha) =
+            nightlies::interactive::select_nightlies_to_diff(&nightlies, !args.include_weekends)?;
+        nightlies::diff::show_diff_between_shas(older_sha, newer_sha).await?;
+        return Ok(());
+    }
+
     if args.diff_nightlies {
         nightlies::diff::show_diff_between_latest_two(&nightlies, args.include_weekends).await?;
         return Ok(());
