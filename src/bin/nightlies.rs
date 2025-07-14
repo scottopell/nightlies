@@ -64,6 +64,10 @@ struct Args {
     /// Interactively select nightlies to diff
     #[arg(long, default_value_t = false)]
     diff_interactive: bool,
+
+    /// Number of days to look back for nightlies (default: 7)
+    #[arg(short, long, default_value_t = 7)]
+    days: i64,
 }
 
 /// Checks if a timestamp is on a weekend (Saturday or Sunday)
@@ -225,28 +229,30 @@ async fn main() -> anyhow::Result<()> {
             let b_time = b.sha_timestamp.unwrap_or(b.estimated_last_pushed);
             a_time.cmp(&b_time)
         });
-        // Only show the last week by default
-        let last_week = nightlies_vec
+        // Only show the specified number of days
+        let filtered_nightlies = nightlies_vec
             .into_iter()
             .filter(|n| {
-                // For the "last week" check, use SHA timestamp with fallback to estimated_last_pushed
+                // Use SHA timestamp with fallback to estimated_last_pushed for time filtering
                 let timestamp = n.sha_timestamp.unwrap_or(n.estimated_last_pushed);
 
                 // For the weekend check, use ONLY the estimated_last_pushed (Docker push timestamp)
                 let is_weekend_build = is_weekend(&n.estimated_last_pushed);
 
-                timestamp > (Utc::now() - Duration::days(7))
+                timestamp > (Utc::now() - Duration::days(args.days))
                     && (args.include_weekends || !is_weekend_build)
             })
             .collect::<Vec<_>>();
 
-        if !last_week.is_empty() {
+        if !filtered_nightlies.is_empty() {
             writeln!(
                 &mut tw,
                 "{}",
                 format!(
-                    "Showing {} nightlies from the past week{}:",
-                    last_week.len(),
+                    "Showing {} nightlies from the past {} day{}{}:",
+                    filtered_nightlies.len(),
+                    args.days,
+                    if args.days == 1 { "" } else { "s" },
                     if !args.include_weekends {
                         " (excluding weekend builds by push date)"
                     } else {
@@ -262,16 +268,19 @@ async fn main() -> anyhow::Result<()> {
                 &mut tw,
                 "{}",
                 if !args.include_weekends {
-                    "No nightlies found for the past week (excluding weekend builds by push date)."
+                    format!("No nightlies found for the past {} day{} (excluding weekend builds by push date).", 
+                           args.days, if args.days == 1 { "" } else { "s" })
                         .yellow()
                 } else {
-                    "No nightlies found for the past week.".yellow()
+                    format!("No nightlies found for the past {} day{}.", 
+                           args.days, if args.days == 1 { "" } else { "s" })
+                        .yellow()
                 }
             )
             .expect("Error writing to tabwriter");
         }
 
-        for n in last_week {
+        for n in filtered_nightlies {
             print(&mut tw, n, args.all_tags, args.print_digest);
         }
     }
