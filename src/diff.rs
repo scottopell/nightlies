@@ -8,6 +8,8 @@ use regex::Regex;
 use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::{debug, warn};
+use tempfile::NamedTempFile;
+use std::io::Write;
 
 /// Regex to identify PR references like "(#12345)" in commit messages
 static PR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(#(?P<num>\d+)\)").unwrap());
@@ -223,10 +225,57 @@ pub async fn show_diff_between_latest_two(
 }
 
 /// Show a diff between two specific SHAs
+///
+/// # Errors
+/// Returns an error if:
+/// - Git commands fail to execute
+/// - Repository path cannot be found
+/// - File operations fail when storing large diffs
 pub async fn show_diff_between_shas(older_sha: String, newer_sha: String) -> Result<()> {
+    const LARGE_DIFF_THRESHOLD: usize = 300;
+    
     // For SHA-based diffs, use the short SHA as the display name
     let older_name = &older_sha[..7];
     let newer_name = &newer_sha[..7];
 
-    display_diff(&older_sha, &newer_sha, older_name, newer_name).await
+    // First show the summary diff
+    display_diff(&older_sha, &newer_sha, older_name, newer_name).await?;
+
+    // Generate the full diff and check if it's large
+    let repo_path = get_agent_repo_path()?;
+    let full_diff = git_command(&["diff", &older_sha, &newer_sha], repo_path).await?;
+    
+    let line_count = full_diff.lines().count();
+    
+    if line_count > LARGE_DIFF_THRESHOLD {
+        // Create a temporary file to store the diff
+        let mut temp_file = NamedTempFile::new()?;
+        writeln!(temp_file, "# Diff between {} and {}", newer_name, older_name)?;
+        writeln!(temp_file, "# Generated on {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"))?;
+        writeln!(temp_file, "# Lines: {}", line_count)?;
+        writeln!(temp_file)?;
+        write!(temp_file, "{}", full_diff)?;
+        
+        // Get the path before showing the diff
+        let temp_path = temp_file.path().to_string_lossy().to_string();
+        
+        println!("\n{}", format!("Large diff detected ({} lines)", line_count).yellow());
+        println!("{}", format!("Full diff saved to: {}", temp_path).cyan());
+        
+        // Keep the temp file alive by storing it in a static location
+        // This is a bit of a hack, but it ensures the file persists
+        let persistent_path = format!("/tmp/nightlies_diff_{}_{}.patch", older_name, newer_name);
+        std::fs::copy(&temp_path, &persistent_path)?;
+        
+        println!("{}", format!("Persistent copy saved to: {}", persistent_path).cyan());
+        
+        // Show the diff in a pager
+        println!("\n{}", "Opening full diff in pager...".green());
+        let _ = Command::new("less")
+            .arg(&persistent_path)
+            .status()
+            .await;
+    }
+    
+    Ok(())
 }
