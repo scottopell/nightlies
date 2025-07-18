@@ -5,14 +5,46 @@ use chrono::{Datelike, Weekday};
 use colored::Colorize;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::{debug, warn};
 use tempfile::NamedTempFile;
 use std::io::Write;
+use serde::{Deserialize, Serialize};
 
 /// Regex to identify PR references like "(#12345)" in commit messages
 static PR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(#(?P<num>\d+)\)").unwrap());
+
+/// Struct to deserialize the release.json file from datadog-agent repository
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ReleaseJson {
+    #[serde(rename = "base_branch")]
+    base_branch: Option<String>,
+    #[serde(rename = "current_milestone")]
+    current_milestone: Option<String>,
+    dependencies: HashMap<String, String>,
+    #[serde(rename = "last_stable")]
+    last_stable: Option<HashMap<String, String>>,
+}
+
+/// Status of a component between two nightlies
+#[derive(Debug, Clone, PartialEq)]
+enum ComponentStatus {
+    Same,
+    Updated,
+    New,
+    Removed,
+}
+
+/// Represents a component version comparison
+#[derive(Debug, Clone)]
+struct ComponentDiff {
+    name: String,
+    base_version: Option<String>,
+    comparison_version: Option<String>,
+    status: ComponentStatus,
+}
 
 /// Returns true if the given timestamp is a Saturday or Sunday (UTC).
 fn is_weekend(ts: &chrono::DateTime<chrono::Utc>) -> bool {
@@ -44,6 +76,14 @@ async fn git_command(args: &[&str], repo_path: PathBuf) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Fetch release.json from a specific commit SHA
+async fn get_release_json(sha: &str, repo_path: PathBuf) -> Result<ReleaseJson> {
+    let output = git_command(&["show", &format!("{}:release.json", sha)], repo_path).await?;
+    let release_json: ReleaseJson = serde_json::from_str(&output)
+        .map_err(|e| anyhow::anyhow!("Failed to parse release.json from SHA {}: {}", sha, e))?;
+    Ok(release_json)
+}
+
 /// Extract insertions and deletions for a commit
 async fn get_commit_stats(sha: &str, repo_path: PathBuf) -> Result<(u32, u32)> {
     // Separate regexes for insertion and deletion counts (handles singular/plural)
@@ -71,6 +111,105 @@ async fn get_commit_stats(sha: &str, repo_path: PathBuf) -> Result<(u32, u32)> {
 
     // If no stats found, return zeros
     Ok((0, 0))
+}
+
+/// Compare component versions between two release.json files
+async fn compare_components(
+    older_sha: &str,
+    newer_sha: &str,
+    repo_path: PathBuf,
+) -> Result<Vec<ComponentDiff>> {
+    let older_release = get_release_json(older_sha, repo_path.clone()).await?;
+    let newer_release = get_release_json(newer_sha, repo_path).await?;
+
+    let mut diffs = Vec::new();
+    let mut all_components = std::collections::HashSet::new();
+
+    // Collect all component names from both releases
+    for name in older_release.dependencies.keys() {
+        all_components.insert(name.clone());
+    }
+    for name in newer_release.dependencies.keys() {
+        all_components.insert(name.clone());
+    }
+
+    // Compare each component
+    for name in all_components {
+        let older_version = older_release.dependencies.get(&name).cloned();
+        let newer_version = newer_release.dependencies.get(&name).cloned();
+
+        let status = match (&older_version, &newer_version) {
+            (Some(old), Some(new)) => {
+                if old == new {
+                    ComponentStatus::Same
+                } else {
+                    ComponentStatus::Updated
+                }
+            }
+            (None, Some(_)) => ComponentStatus::New,
+            (Some(_), None) => ComponentStatus::Removed,
+            (None, None) => continue, // Shouldn't happen but skip if it does
+        };
+
+        diffs.push(ComponentDiff {
+            name,
+            base_version: older_version,
+            comparison_version: newer_version,
+            status,
+        });
+    }
+
+    // Sort by component name for consistent output
+    diffs.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(diffs)
+}
+
+/// Display component version differences in a formatted table
+fn display_component_diff(component_diffs: &[ComponentDiff]) {
+    if component_diffs.is_empty() {
+        println!("│ No component version changes found.");
+        return;
+    }
+
+    println!("│");
+    println!("│ {} Component version changes:", "🔧".cyan());
+
+    for diff in component_diffs {
+        match diff.status {
+            ComponentStatus::Same => {
+                // Skip displaying unchanged components for cleaner output
+            }
+            ComponentStatus::Updated => {
+                let old_version = diff.base_version.as_deref().unwrap_or("unknown");
+                let new_version = diff.comparison_version.as_deref().unwrap_or("unknown");
+                println!(
+                    "│   {} {} → {}",
+                    diff.name.cyan(),
+                    old_version.red(),
+                    new_version.green()
+                );
+            }
+            ComponentStatus::New => {
+                let new_version = diff.comparison_version.as_deref().unwrap_or("unknown");
+                println!(
+                    "│   {} {} {}",
+                    diff.name.cyan(),
+                    "added".green(),
+                    new_version.green()
+                );
+            }
+            ComponentStatus::Removed => {
+                let old_version = diff.base_version.as_deref().unwrap_or("unknown");
+                println!(
+                    "│   {} {} {}",
+                    diff.name.cyan(),
+                    "removed".red(),
+                    old_version.red()
+                );
+            }
+        }
+    }
 }
 
 /// Internal function to display a diff between two SHAs with consistent formatting
@@ -163,6 +302,18 @@ async fn display_diff(
                     println!("│   {sha_colored} {message_part} {link_colored}");
                 }
             }
+        }
+    }
+
+    // Add component version comparison
+    match compare_components(older_sha, newer_sha, repo_path.clone()).await {
+        Ok(component_diffs) => {
+            display_component_diff(&component_diffs);
+        }
+        Err(e) => {
+            warn!("Failed to compare component versions: {}", e);
+            println!("│");
+            println!("│ {} Component version comparison failed: {}", "⚠️".yellow(), e);
         }
     }
 
