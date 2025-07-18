@@ -19,6 +19,8 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Commands>,
     /// Show tag details including pushed date and digest
     #[arg(short, long, default_value_t = false)]
     all_tags: bool,
@@ -57,23 +59,83 @@ struct Args {
     #[arg(long, default_value_t = false)]
     include_weekends: bool,
 
-    /// Show a concise diff between the two most recent nightlies
-    #[arg(long, default_value_t = false)]
-    diff_nightlies: bool,
-
-    /// Interactively select nightlies to diff
-    #[arg(long, default_value_t = false)]
-    diff_interactive: bool,
 
     /// Number of days to look back for nightlies (default: 7)
     #[arg(short, long, default_value_t = 7)]
     days: i64,
 }
 
+#[derive(Parser, Debug)]
+enum Commands {
+    /// Show differences between nightlies
+    Diff {
+        /// Base (older) nightly for comparison. Can be a tag name, SHA, or full image URI.
+        /// Examples: "nightly-full-main-abcd1234-jmx", "abcd1234", "datadog/agent-dev:nightly-full-main-abcd1234-jmx"
+        #[arg(long)]
+        base: Option<String>,
+
+        /// Comparison (newer) nightly for comparison. Can be a tag name, SHA, or full image URI.
+        /// Examples: "nightly-full-main-efgh5678-jmx", "efgh5678", "datadog/agent-dev:nightly-full-main-efgh5678-jmx"
+        #[arg(long)]
+        comparison: Option<String>,
+
+        /// Interactively select nightlies to diff
+        #[arg(short, long, default_value_t = false)]
+        interactive: bool,
+
+        /// Include weekend builds (Saturday/Sunday in UTC)
+        #[arg(long, default_value_t = false)]
+        include_weekends: bool,
+    },
+}
+
 /// Checks if a timestamp is on a weekend (Saturday or Sunday)
 fn is_weekend(timestamp: &chrono::DateTime<chrono::Utc>) -> bool {
     let weekday = timestamp.weekday();
     weekday == Weekday::Sat || weekday == Weekday::Sun
+}
+
+/// Parse a nightly identifier from various formats
+/// 
+/// Handles:
+/// - Tag names: "nightly-full-main-abcd1234-jmx"
+/// - SHAs: "abcd1234" (8 characters)
+/// - Full URIs: "datadog/agent-dev:nightly-full-main-abcd1234-jmx"
+fn parse_nightly_identifier(input: &str) -> Option<String> {
+    // Check if it's a full URI
+    if input.starts_with("datadog/agent-dev:") {
+        let tag_part = input.strip_prefix("datadog/agent-dev:")?;
+        return extract_sha_from_tag(tag_part);
+    }
+    
+    // Check if it's a full tag name
+    if input.starts_with("nightly-full-main-") && input.ends_with("-jmx") {
+        return extract_sha_from_tag(input);
+    }
+    
+    // Check if it's a SHA (8 characters, alphanumeric)
+    if input.len() == 8 && input.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Some(input.to_string());
+    }
+    
+    None
+}
+
+/// Extract SHA from a tag name
+fn extract_sha_from_tag(tag: &str) -> Option<String> {
+    if tag.starts_with("nightly-full-main-") && tag.ends_with("-jmx") {
+        if let Some(sha) = tag.split('-').nth(3) {
+            if sha.len() == 8 {
+                return Some(sha.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Find a nightly by SHA
+fn find_nightly_by_sha<'a>(nightlies: &'a [nightlies::nightly::Nightly], sha: &str) -> Option<&'a nightlies::nightly::Nightly> {
+    nightlies.iter().find(|n| n.sha == sha)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -89,6 +151,27 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Hello, world!");
     let args = Args::parse();
+
+    // Handle subcommands
+    if let Some(command) = &args.command {
+        match command {
+            Commands::Diff { base, comparison, interactive, include_weekends: _ } => {
+                // Validate argument combinations for diff subcommand
+                if base.is_some() && comparison.is_none() {
+                    anyhow::bail!("--base requires --comparison to be specified");
+                }
+                if comparison.is_some() && base.is_none() {
+                    anyhow::bail!("--comparison requires --base to be specified");
+                }
+                if (base.is_some() || comparison.is_some()) && *interactive {
+                    anyhow::bail!("--base/--comparison cannot be used with --interactive");
+                }
+                
+                // Execute diff command logic after loading nightlies
+                // This will be handled later in the function
+            }
+        }
+    }
 
     // TODO the way this should work is that we query pages until we are able to
     // find the target_sha
@@ -170,18 +253,56 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let mut tw = TabWriter::new(vec![]);
-    if args.diff_interactive {
-        let (older_sha, newer_sha) =
-            nightlies::interactive::select_nightlies_to_diff(&nightlies, !args.include_weekends)?;
-        nightlies::diff::show_diff_between_shas(older_sha, newer_sha).await?;
-        return Ok(());
+    // Handle subcommands
+    if let Some(command) = &args.command {
+        match command {
+            Commands::Diff { base, comparison, interactive, include_weekends } => {
+                if *interactive {
+                    let (older_sha, newer_sha) =
+                        nightlies::interactive::select_nightlies_to_diff(&nightlies, !*include_weekends)?;
+                    nightlies::diff::show_diff_between_shas(older_sha, newer_sha).await?;
+                    return Ok(());
+                }
+
+                // Handle non-interactive diffing with --base and --comparison
+                if let (Some(base_input), Some(comparison_input)) = (base, comparison) {
+                    // Parse the base identifier
+                    let base_sha = parse_nightly_identifier(base_input)
+                        .ok_or_else(|| anyhow::anyhow!("Invalid base identifier: '{}'. Expected tag name, SHA, or full URI.", base_input))?;
+                    
+                    // Parse the comparison identifier  
+                    let comparison_sha = parse_nightly_identifier(comparison_input)
+                        .ok_or_else(|| anyhow::anyhow!("Invalid comparison identifier: '{}'. Expected tag name, SHA, or full URI.", comparison_input))?;
+                    
+                    // Find the nightlies
+                    let base_nightly = find_nightly_by_sha(&nightlies, &base_sha)
+                        .ok_or_else(|| anyhow::anyhow!("Base nightly not found for SHA: {}", base_sha))?;
+                    
+                    let comparison_nightly = find_nightly_by_sha(&nightlies, &comparison_sha)
+                        .ok_or_else(|| anyhow::anyhow!("Comparison nightly not found for SHA: {}", comparison_sha))?;
+                    
+                    // Ensure proper ordering (older first)
+                    let base_ts = base_nightly.sha_timestamp.unwrap_or(base_nightly.estimated_last_pushed);
+                    let comparison_ts = comparison_nightly.sha_timestamp.unwrap_or(comparison_nightly.estimated_last_pushed);
+                    
+                    let (older_sha, newer_sha) = if base_ts > comparison_ts {
+                        (comparison_sha, base_sha)
+                    } else {
+                        (base_sha, comparison_sha)
+                    };
+                    
+                    nightlies::diff::show_diff_between_shas(older_sha, newer_sha).await?;
+                    return Ok(());
+                }
+
+                // Default behavior: show diff between latest two nightlies
+                nightlies::diff::show_diff_between_latest_two(&nightlies, *include_weekends).await?;
+                return Ok(());
+            }
+        }
     }
 
-    if args.diff_nightlies {
-        nightlies::diff::show_diff_between_latest_two(&nightlies, args.include_weekends).await?;
-        return Ok(());
-    }
+    let mut tw = TabWriter::new(vec![]);
 
     if args.latest_only {
         let latest = nightlies.iter().max_by_key(|n| n.sha_timestamp);
