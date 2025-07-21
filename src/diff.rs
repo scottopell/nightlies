@@ -9,9 +9,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::{debug, warn};
-use tempfile::NamedTempFile;
-use std::io::Write;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write;
 
 /// Regex to identify PR references like "(#12345)" in commit messages
 static PR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(#(?P<num>\d+)\)").unwrap());
@@ -165,15 +164,15 @@ async fn compare_components(
     Ok(diffs)
 }
 
-/// Display component version differences in a formatted table
-fn display_component_diff(component_diffs: &[ComponentDiff]) {
+/// Add component version differences to a report string
+fn add_component_diff_to_report(report: &mut String, component_diffs: &[ComponentDiff]) -> Result<()> {
     if component_diffs.is_empty() {
-        println!("│ No component version changes found.");
-        return;
+        writeln!(report, "│ No component version changes found.")?;
+        return Ok(());
     }
 
-    println!("│");
-    println!("│ {} Component version changes:", "🔧".cyan());
+    writeln!(report, "│")?;
+    writeln!(report, "│ 🔧 Component version changes:")?;
 
     for diff in component_diffs {
         match diff.status {
@@ -183,42 +182,44 @@ fn display_component_diff(component_diffs: &[ComponentDiff]) {
             ComponentStatus::Updated => {
                 let old_version = diff.base_version.as_deref().unwrap_or("unknown");
                 let new_version = diff.comparison_version.as_deref().unwrap_or("unknown");
-                println!(
+                writeln!(
+                    report,
                     "│   {} {} → {}",
-                    diff.name.cyan(),
-                    old_version.red(),
-                    new_version.green()
-                );
+                    diff.name,
+                    old_version,
+                    new_version
+                )?;
             }
             ComponentStatus::New => {
                 let new_version = diff.comparison_version.as_deref().unwrap_or("unknown");
-                println!(
-                    "│   {} {} {}",
-                    diff.name.cyan(),
-                    "added".green(),
-                    new_version.green()
-                );
+                writeln!(
+                    report,
+                    "│   {} added {}",
+                    diff.name,
+                    new_version
+                )?;
             }
             ComponentStatus::Removed => {
                 let old_version = diff.base_version.as_deref().unwrap_or("unknown");
-                println!(
-                    "│   {} {} {}",
-                    diff.name.cyan(),
-                    "removed".red(),
-                    old_version.red()
-                );
+                writeln!(
+                    report,
+                    "│   {} removed {}",
+                    diff.name,
+                    old_version
+                )?;
             }
         }
     }
+    Ok(())
 }
 
-/// Internal function to display a diff between two SHAs with consistent formatting
-async fn display_diff(
+/// Internal function to generate a diff report between two SHAs
+async fn generate_diff_report(
     older_sha: &str,
     newer_sha: &str,
     older_name: &str,
     newer_name: &str,
-) -> Result<()> {
+) -> Result<String> {
     let repo_path = get_agent_repo_path()?;
 
     // Run git commands sequentially (diff generation is fast enough)
@@ -233,19 +234,13 @@ async fn display_diff(
     let stat_output =
         git_command(&["diff", "--stat", older_sha, newer_sha], repo_path.clone()).await?;
 
-    // Print final report
-    println!(
-        "{}",
-        format!(
-            "┌─ Diff between {} and {}",
-            newer_name.green(),
-            older_name.green()
-        )
-        .bold()
-    );
+    // Build report string
+    let mut report = String::new();
+    
+    writeln!(report, "┌─ Diff between {} and {}", newer_name, older_name)?;
 
     let commit_lines: Vec<&str> = commits_output.lines().collect();
-    println!("│ {} commits:", commit_lines.len());
+    writeln!(report, "│ {} commits:", commit_lines.len())?;
 
     for line in &commit_lines {
         // First token is the SHA
@@ -274,32 +269,22 @@ async fn display_diff(
         } else {
             sha_token
         };
-        let sha_colored = sha_short.cyan();
-
-        // Colored link if present
-        let link_colored = pr_link_opt
-            .as_deref()
-            .map(|l| l.blue().underline().to_string())
-            .unwrap_or_default();
 
         // Fetch commit stats
         match get_commit_stats(sha_token, repo_path.clone()).await {
             Ok((ins, del)) => {
-                let plus = format!("+{ins}").green();
-                let minus = format!("-{del}").red();
-
-                if link_colored.is_empty() {
-                    println!("│   {sha_colored} {message_part} ({plus}, {minus})");
+                if let Some(link) = pr_link_opt.as_deref() {
+                    writeln!(report, "│   {} {} {} (+{}, -{})", sha_short, message_part, link, ins, del)?;
                 } else {
-                    println!("│   {sha_colored} {message_part} {link_colored} ({plus}, {minus})");
+                    writeln!(report, "│   {} {} (+{}, -{})", sha_short, message_part, ins, del)?;
                 }
             }
             Err(_) => {
                 // Fallback to original (non-colored) line
-                if link_colored.is_empty() {
-                    println!("│   {sha_colored} {message_part}");
+                if let Some(link) = pr_link_opt.as_deref() {
+                    writeln!(report, "│   {} {} {}", sha_short, message_part, link)?;
                 } else {
-                    println!("│   {sha_colored} {message_part} {link_colored}");
+                    writeln!(report, "│   {} {}", sha_short, message_part)?;
                 }
             }
         }
@@ -308,16 +293,16 @@ async fn display_diff(
     // Add component version comparison
     match compare_components(older_sha, newer_sha, repo_path.clone()).await {
         Ok(component_diffs) => {
-            display_component_diff(&component_diffs);
+            add_component_diff_to_report(&mut report, &component_diffs)?;
         }
         Err(e) => {
             warn!("Failed to compare component versions: {}", e);
-            println!("│");
-            println!("│ {} Component version comparison failed: {}", "⚠️".yellow(), e);
+            writeln!(report, "│")?;
+            writeln!(report, "│ ⚠️ Component version comparison failed: {}", e)?;
         }
     }
 
-    println!("│\n│ File summary:");
+    writeln!(report, "│\n│ File summary:")?;
 
     let mut binary_count = 0u32;
     for line in stat_output.lines() {
@@ -329,16 +314,16 @@ async fn display_diff(
             }
         }
 
-        println!("│   {line}");
+        writeln!(report, "│   {}", line)?;
     }
 
     if binary_count > 0 {
-        println!("│   ({binary_count} binary files changed)");
+        writeln!(report, "│   ({} binary files changed)", binary_count)?;
     }
 
-    println!("└─────────────────────────────────────");
+    writeln!(report, "└─────────────────────────────────────")?;
 
-    Ok(())
+    Ok(report)
 }
 
 /// Show a concise source diff between the two most-recent nightlies (respecting weekend filter).
@@ -372,7 +357,39 @@ pub async fn show_diff_between_latest_two(
     let newer = filtered[0];
     let older = filtered[1];
 
-    display_diff(&older.sha, &newer.sha, &older.tag.name, &newer.tag.name).await
+    // Generate the report
+    let report = generate_diff_report(&older.sha, &newer.sha, &older.tag.name, &newer.tag.name).await?;
+    print!("{}", report);
+
+    // Generate the full diff
+    let repo_path = get_agent_repo_path()?;
+    let full_diff = git_command(&["diff", &older.sha, &newer.sha], repo_path).await?;
+    
+    let line_count = full_diff.lines().count();
+    
+    // Use short SHAs for file names
+    let older_name = &older.sha[..7];
+    let newer_name = &newer.sha[..7];
+    
+    // Save report to tmp file
+    let report_path = format!("/tmp/nightlies_report_{}_{}.txt", older_name, newer_name);
+    std::fs::write(&report_path, &report)?;
+    
+    // Save patch to tmp file
+    let mut patch_content = String::new();
+    writeln!(patch_content, "# Diff between {} and {}", newer.tag.name, older.tag.name)?;
+    writeln!(patch_content, "# Generated on {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"))?;
+    writeln!(patch_content, "# Lines: {}", line_count)?;
+    writeln!(patch_content)?;
+    patch_content.push_str(&full_diff);
+    
+    let patch_path = format!("/tmp/nightlies_diff_{}_{}.patch", older_name, newer_name);
+    std::fs::write(&patch_path, &patch_content)?;
+    
+    println!("\n{}", format!("Report saved to: {}", report_path).cyan());
+    println!("{}", format!("Patch saved to: {}", patch_path).cyan());
+    
+    Ok(())
 }
 
 /// Show a diff between two specific SHAs
@@ -381,52 +398,46 @@ pub async fn show_diff_between_latest_two(
 /// Returns an error if:
 /// - Git commands fail to execute
 /// - Repository path cannot be found
-/// - File operations fail when storing large diffs
+/// - File operations fail when storing diffs
 pub async fn show_diff_between_shas(older_sha: String, newer_sha: String) -> Result<()> {
-    const LARGE_DIFF_THRESHOLD: usize = 300;
-    
     // For SHA-based diffs, use the short SHA as the display name
     let older_name = &older_sha[..7];
     let newer_name = &newer_sha[..7];
 
-    // First show the summary diff
-    display_diff(&older_sha, &newer_sha, older_name, newer_name).await?;
+    // Generate the report
+    let report = generate_diff_report(&older_sha, &newer_sha, older_name, newer_name).await?;
+    print!("{}", report);
 
-    // Generate the full diff and check if it's large
+    // Generate the full diff
     let repo_path = get_agent_repo_path()?;
     let full_diff = git_command(&["diff", &older_sha, &newer_sha], repo_path).await?;
     
     let line_count = full_diff.lines().count();
     
-    if line_count > LARGE_DIFF_THRESHOLD {
-        // Create a temporary file to store the diff
-        let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "# Diff between {} and {}", newer_name, older_name)?;
-        writeln!(temp_file, "# Generated on {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"))?;
-        writeln!(temp_file, "# Lines: {}", line_count)?;
-        writeln!(temp_file)?;
-        write!(temp_file, "{}", full_diff)?;
-        
-        // Get the path before showing the diff
-        let temp_path = temp_file.path().to_string_lossy().to_string();
-        
-        println!("\n{}", format!("Large diff detected ({} lines)", line_count).yellow());
-        println!("{}", format!("Full diff saved to: {}", temp_path).cyan());
-        
-        // Keep the temp file alive by storing it in a static location
-        // This is a bit of a hack, but it ensures the file persists
-        let persistent_path = format!("/tmp/nightlies_diff_{}_{}.patch", older_name, newer_name);
-        std::fs::copy(&temp_path, &persistent_path)?;
-        
-        println!("{}", format!("Persistent copy saved to: {}", persistent_path).cyan());
-        
-        // Show the diff in a pager
-        println!("\n{}", "Opening full diff in pager...".green());
-        let _ = Command::new("less")
-            .arg(&persistent_path)
-            .status()
-            .await;
-    }
+    // Save report to tmp file
+    let report_path = format!("/tmp/nightlies_report_{}_{}.txt", older_name, newer_name);
+    std::fs::write(&report_path, &report)?;
+    
+    // Save patch to tmp file
+    let mut patch_content = String::new();
+    writeln!(patch_content, "# Diff between {} and {}", newer_name, older_name)?;
+    writeln!(patch_content, "# Generated on {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"))?;
+    writeln!(patch_content, "# Lines: {}", line_count)?;
+    writeln!(patch_content)?;
+    patch_content.push_str(&full_diff);
+    
+    let patch_path = format!("/tmp/nightlies_diff_{}_{}.patch", older_name, newer_name);
+    std::fs::write(&patch_path, &patch_content)?;
+    
+    println!("\n{}", format!("Report saved to: {}", report_path).cyan());
+    println!("{}", format!("Patch saved to: {}", patch_path).cyan());
+    
+    // Show the diff in a pager
+    println!("\n{}", "Opening full diff in pager...".green());
+    let _ = Command::new("less")
+        .arg(&patch_path)
+        .status()
+        .await;
     
     Ok(())
 }
